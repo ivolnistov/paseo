@@ -80,6 +80,9 @@ jobs:
           npx vitest run --bail=1
           src/server/daemon-version.test.ts
           src/server/session/daemon/npm-global-cli.test.ts
+      - name: CLI daemon runner suite
+        working-directory: packages/cli
+        run: npx vitest run --bail=1 src/commands/daemon/local-daemon.test.ts
 
   pack:
     needs: [validate, checks]
@@ -204,39 +207,52 @@ jobs:
         with:
           name: fork-packages
           path: ${{ runner.temp }}/packages
-      - name: Read what the owned registry already has for this version
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "@ivolnistov:registry=https://npm.pkg.github.com" \
-            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$RUNNER_TEMP/npmrc"
-          # Only a 404 means "not published"; any other error (auth, network) stops the release.
-          node -e '
-            const { execFileSync } = require("child_process");
-            const m = require(process.argv[1]);
-            const existing = {};
-            for (const p of m.packages) {
-              const spec = `${p.name}@${p.version}`;
-              try {
-                const out = execFileSync("npm", ["view", spec, "dist.integrity", "--userconfig", process.argv[2],
-                  "--registry", "https://npm.pkg.github.com"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-                if (out) existing[spec] = out;
-              } catch (error) {
-                if (/E404|404 Not Found/.test(String(error.stderr))) continue;
-                console.error(String(error.stderr)); process.exit(1);
-              }
-            }
-            require("fs").writeFileSync(process.argv[3], JSON.stringify(existing, null, 2));
-          ' "$RUNNER_TEMP/packages/manifest.json" "$RUNNER_TEMP/npmrc" "$RUNNER_TEMP/existing.json"
       - name: Validate the exact artifacts against the strict registry and the dispatch inputs
         env:
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha }}
         run: |
           node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
+            --registry https://npm.pkg.github.com --version "$VERSION" --source-sha "$SHA"
+      - name: Read what the owned registry already has for this version
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "@ivolnistov:registry=https://npm.pkg.github.com" \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$RUNNER_TEMP/npmrc"
+          # Only the seven owned names at the validated version are queried; the artifacts choose nothing.
+          # A 404 means "not published"; any other error, or an existing version without an integrity, stops.
+          node -e '
+            const { execFileSync } = require("child_process");
+            const [userconfig, out, version] = process.argv.slice(1);
+            const names = ["@ivolnistov/paseo-protocol", "@ivolnistov/paseo-highlight", "@ivolnistov/paseo-relay",
+              "@ivolnistov/paseo-client", "@ivolnistov/paseo-plugin", "@ivolnistov/paseo-server", "@ivolnistov/paseo"];
+            const existing = {};
+            for (const name of names) {
+              const spec = `${name}@${version}`;
+              let integrity;
+              try {
+                integrity = execFileSync("npm", ["view", spec, "dist.integrity", "--userconfig", userconfig,
+                  "--registry", "https://npm.pkg.github.com"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+              } catch (error) {
+                if (/E404|404 Not Found/.test(String(error.stderr))) continue;
+                console.error(String(error.stderr)); process.exit(1);
+              }
+              if (!/^sha512-/.test(integrity)) { console.error(`${spec}: no sha512 integrity reported`); process.exit(1); }
+              existing[spec] = integrity;
+            }
+            require("fs").writeFileSync(out, JSON.stringify(existing, null, 2));
+          ' "$RUNNER_TEMP/npmrc" "$RUNNER_TEMP/existing.json" "$VERSION"
+      - name: Plan against the registry inventory (identical versions are skipped)
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
             --registry https://npm.pkg.github.com --version "$VERSION" --source-sha "$SHA" \
-            --existing "$RUNNER_TEMP/existing.json" | tee "$RUNNER_TEMP/plan.txt"
+            --existing "$RUNNER_TEMP/existing.json"
       - name: Publish the validated, not yet published packages, components first and the CLI last
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
