@@ -1,8 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { DefaultNpmGlobalPaseoCli } from "./npm-global-cli.js";
+import { pathToFileURL } from "node:url";
+import {
+  DefaultNpmGlobalPaseoCli,
+  npmGlobalPaseoCli,
+  resolvePaseoCliTarget,
+  resolveRunningPaseoCliTarget,
+} from "./npm-global-cli.js";
 
 interface CommandCall {
   command: string;
@@ -123,6 +129,98 @@ describe("DefaultNpmGlobalPaseoCli", () => {
         maxBuffer: 10 * 1024 * 1024,
       },
     ]);
+  });
+
+  // The updater follows the running server's identity: an original install updates the official CLI from the
+  // default registry, a fork install updates only the owned CLI from GitHub Packages. Nothing else is a target.
+  test("maps each server identity to its own CLI package and registry", () => {
+    expect(resolvePaseoCliTarget("@getpaseo/server")).toEqual({
+      packageName: "@getpaseo/cli",
+      registry: null,
+    });
+    expect(resolvePaseoCliTarget("@ivolnistov/paseo-server")).toEqual({
+      packageName: "@ivolnistov/paseo",
+      registry: "https://npm.pkg.github.com",
+    });
+  });
+
+  test("refuses to derive an update target from any other server name", () => {
+    expect(() => resolvePaseoCliTarget("@someone-else/paseo-server")).toThrow();
+    expect(() => resolvePaseoCliTarget("paseo-server")).toThrow();
+  });
+
+  test("an owned install inspects and updates only the owned CLI from the approved registry", async () => {
+    const calls: CommandCall[] = [];
+    const dir = mkdtempSync(path.join(tmpdir(), "paseo-npm-global-"));
+    tempDirs.push(dir);
+    const root = path.join(dir, "prefix", "lib");
+    const packagePath = path.join(root, "node_modules", "@ivolnistov", "paseo");
+    mkdirSync(packagePath, { recursive: true });
+    const npmLsJson = JSON.stringify({
+      name: "lib",
+      path: root,
+      dependencies: {
+        "@ivolnistov/paseo": {
+          version: "0.13.0-fork.1",
+          resolved: "https://npm.pkg.github.com/download/@ivolnistov/paseo/0.13.0-fork.1/x.tgz",
+          path: packagePath,
+        },
+      },
+    });
+    const cli = new DefaultNpmGlobalPaseoCli(async (command, args) => {
+      calls.push({ command, args });
+      return {
+        exitCode: 0,
+        stdout: args[0] === "-g" ? npmLsJson : "changed 1 package",
+        stderr: "",
+      };
+    }, resolvePaseoCliTarget("@ivolnistov/paseo-server"));
+
+    await expect(cli.inspect()).resolves.toMatchObject({ version: "0.13.0-fork.1", packagePath });
+    await cli.installLatest();
+    const [ls, install] = calls;
+    expect(ls?.args).toContain("@ivolnistov/paseo");
+    expect(install?.args).toContain("@ivolnistov/paseo@latest");
+    expect(install?.args.some((arg) => arg.includes("https://npm.pkg.github.com"))).toBe(true);
+    for (const call of calls) {
+      expect(call.args.join(" ")).not.toContain("@getpaseo/cli");
+    }
+  });
+
+  test("an owned install never treats the official CLI as its own", async () => {
+    const official = createGlobalInstall({ linked: false });
+    const cli = new DefaultNpmGlobalPaseoCli(
+      async () => ({ exitCode: 0, stdout: official.npmLsJson, stderr: "" }),
+      resolvePaseoCliTarget("@ivolnistov/paseo-server"),
+    );
+
+    await expect(cli.inspect()).rejects.toThrow(
+      "@ivolnistov/paseo is not installed with npm -g on this host",
+    );
+  });
+
+  // The production updater takes its target from the running server's own package.json, not from a caller.
+  test("the production target follows the running server package identity", () => {
+    const moduleIn = (name: string) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "paseo-npm-global-"));
+      tempDirs.push(dir);
+      mkdirSync(path.join(dir, "dist", "server"), { recursive: true });
+      writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, version: "1.0.0" }));
+      return pathToFileURL(path.join(dir, "dist", "server", "npm-global-cli.js")).href;
+    };
+    expect(resolveRunningPaseoCliTarget(moduleIn("@ivolnistov/paseo-server"))).toEqual({
+      packageName: "@ivolnistov/paseo",
+      registry: "https://npm.pkg.github.com",
+    });
+    expect(resolveRunningPaseoCliTarget(moduleIn("@getpaseo/server")).packageName).toBe(
+      "@getpaseo/cli",
+    );
+    // An unknown identity has no update target at all; it never falls back to the official CLI.
+    expect(() => resolveRunningPaseoCliTarget(moduleIn("@someone-else/paseo-server"))).toThrow();
+  });
+
+  test("this checkout's production updater targets the original CLI", () => {
+    expect(npmGlobalPaseoCli.target).toEqual({ packageName: "@getpaseo/cli", registry: null });
   });
 
   test("reports missing npm when npm exits without JSON", async () => {

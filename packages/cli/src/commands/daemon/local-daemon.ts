@@ -4,12 +4,20 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { startDaemonInstance, resolvePaseoHome } from "@getpaseo/server/daemon-control";
 const require = createRequire(import.meta.url);
-function resolveServerRunnerFromDir(currentDir: string): string | null {
+// The server package's original and owned fork names (packages/server/src/server/server-identity.ts). The owned
+// package is installed under the @getpaseo/server alias, so its directory and its package.json name differ.
+const SERVER_PACKAGE_NAMES: ReadonlySet<string> = new Set([
+  "@getpaseo/server",
+  "@ivolnistov/paseo-server",
+]);
+
+export function resolveServerRunnerFromDir(currentDir: string): string | null {
   const packageJsonPath = path.join(currentDir, "package.json");
   if (!existsSync(packageJsonPath)) return null;
   try {
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as { name?: string };
-    if (packageJson.name !== "@getpaseo/server") return null;
+    if (typeof packageJson.name !== "string" || !SERVER_PACKAGE_NAMES.has(packageJson.name))
+      return null;
     const distRunner = path.join(currentDir, "dist", "scripts", "supervisor-entrypoint.js");
     if (existsSync(distRunner)) {
       return distRunner;
@@ -37,7 +45,7 @@ function resolveDaemonRunnerEntry(): string {
     currentDir = parentDir;
   }
 
-  throw new Error("Unable to resolve @getpaseo/server package root for daemon runner");
+  throw new Error("Unable to resolve the Paseo server package root for the daemon runner");
 }
 
 export async function launchLocalDaemon(options: {
