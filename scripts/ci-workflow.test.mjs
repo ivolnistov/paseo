@@ -530,3 +530,117 @@ test("Windows units and integration run independently with complete routed cover
     assert.equal(selected(integrationCondition, outputs, true), false);
   }
 });
+
+// ---- Fork delivery boundary (fork-integration-20261024 N4). The fork may never deploy or publish as upstream,
+// its ordinary builds hold no credentials, and only gated release jobs may write packages or releases.
+const { parse: parseYaml } = await import("yaml");
+const workflowsDir = new URL(".github/workflows/", repoRoot);
+const OFFICIAL_GUARD = /github\.repository(_owner)?\s*==\s*'getpaseo(\/paseo)?'/;
+const inheritedDeployWorkflows = [
+  "android-apk-release.yml",
+  "deploy-app.yml",
+  "deploy-relay.yml",
+  "deploy-website.yml",
+  "desktop-release.yml",
+  "desktop-rollout.yml",
+  "docker.yml",
+  "nix-update-hash.yml",
+  "release-notes-sync.yml",
+];
+
+function loadWorkflow(name) {
+  return parseYaml(readFileSync(new URL(name, workflowsDir), "utf8"));
+}
+
+function writesAnything(permissions) {
+  if (permissions === "write-all") return true;
+  return (
+    Boolean(permissions) &&
+    typeof permissions === "object" &&
+    Object.values(permissions).includes("write")
+  );
+}
+
+function usesSecrets(value) {
+  return /\$\{\{\s*secrets\./.test(JSON.stringify(value ?? ""));
+}
+
+test("inherited deploy and publish jobs only run in the official repository", () => {
+  for (const file of inheritedDeployWorkflows) {
+    const workflow = loadWorkflow(file);
+    for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
+      const privileged =
+        usesSecrets(job) || writesAnything(job.permissions) || writesAnything(workflow.permissions);
+      if (!privileged) continue;
+      assert.match(
+        String(job.if ?? ""),
+        OFFICIAL_GUARD,
+        `${file} job ${id} needs an official-repository guard`,
+      );
+    }
+  }
+});
+
+test("the fork build workflow is read-only and credential-free", () => {
+  const workflow = loadWorkflow("fork-build.yml");
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
+    assert.ok(!writesAnything(job.permissions), `fork-build job ${id} must not write`);
+    assert.ok(!usesSecrets(job), `fork-build job ${id} must not read secrets`);
+    assert.equal(
+      job.environment,
+      undefined,
+      `fork-build job ${id} must not use a protected environment`,
+    );
+  }
+});
+
+test("the fork release is manual, pinned to an explicit tag, commit and version", () => {
+  const workflow = loadWorkflow("fork-release.yml");
+  const on = workflow.on ?? workflow[true];
+  assert.deepEqual(Object.keys(on), ["workflow_dispatch"], "no push, tag or schedule triggers");
+  for (const input of ["tag", "sha", "version"]) {
+    assert.equal(
+      on.workflow_dispatch.inputs?.[input]?.required,
+      true,
+      `input ${input} is required`,
+    );
+  }
+  assert.ok(!writesAnything(workflow.permissions), "no workflow-wide write permission");
+});
+
+test("fork release credentials stay in their protected jobs", () => {
+  const { jobs } = loadWorkflow("fork-release.yml");
+  const apk = jobs["release-apk"];
+  assert.ok(apk?.environment, "release-apk runs in a protected environment");
+  assert.match(
+    JSON.stringify(apk),
+    /scripts\/build-apk\.sh/,
+    "release-apk builds and signs through the reviewed helper",
+  );
+  assert.ok(!writesAnything(apk.permissions), "release-apk does not write packages or contents");
+
+  const packages = jobs["publish-packages"];
+  assert.ok(packages?.environment, "publish-packages runs in a protected environment");
+  assert.deepEqual(packages.permissions, { contents: "read", packages: "write" });
+  assert.ok([packages.needs].flat().length > 0, "publish-packages consumes earlier artifacts");
+  assert.match(
+    JSON.stringify(packages),
+    /fork-release\.mjs plan-publish/,
+    "validates the exact manifest before publishing",
+  );
+  assert.match(JSON.stringify(packages), /https:\/\/npm\.pkg\.github\.com/);
+
+  const release = jobs["publish-release"];
+  assert.ok(release?.environment, "publish-release runs in a protected environment");
+  assert.deepEqual(release.permissions, { contents: "write" });
+  assert.ok([release.needs].flat().includes("release-apk"), "publishes the APK built in this run");
+
+  for (const [id, job] of Object.entries(jobs)) {
+    if (["release-apk", "publish-packages", "publish-release"].includes(id)) continue;
+    assert.ok(
+      !usesSecrets(job) && !writesAnything(job.permissions) && !job.environment,
+      `${id} is an ordinary job`,
+    );
+  }
+});
