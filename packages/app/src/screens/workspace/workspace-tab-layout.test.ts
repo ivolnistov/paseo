@@ -9,6 +9,7 @@ import { darkPureBlackTheme, darkTheme, lightTheme } from "@/styles/theme";
 import {
   computeWorkspaceTabLayout,
   retainWorkspaceTabMeasuredWidth,
+  scrollOffsetToRevealWorkspaceTab,
 } from "@/screens/workspace/workspace-tab-layout";
 
 const metrics = {
@@ -175,6 +176,40 @@ describe("computeWorkspaceTabLayout", () => {
 
     expect(result.items.map((item) => item.width)).toEqual([102, 138]);
   });
+
+  it("keeps unmeasured tabs and controls accessible until text layout arrives", () => {
+    const initial = computeWorkspaceTabLayout({
+      viewportWidth: 440,
+      tabLabelWidths: [null, null, null],
+      metrics,
+      compact: false,
+    });
+    expect(initial.items.map((item) => item.width)).toEqual([
+      metrics.minTabWidth,
+      metrics.minTabWidth,
+      metrics.minTabWidth,
+    ]);
+    expect(initial.closeButtonPolicy).toBe("all");
+    expect(initial.requiresHorizontalScrollFallback).toBe(false);
+
+    const measured = computeWorkspaceTabLayout({
+      viewportWidth: 440,
+      tabLabelWidths: [40, 130, 90],
+      metrics,
+      compact: false,
+    });
+    expect(measured.items).toHaveLength(3);
+    expect(measured.items[1]?.width).toBeGreaterThan(initial.items[1]?.width ?? 0);
+
+    const overflowing = computeWorkspaceTabLayout({
+      viewportWidth: 440,
+      tabLabelWidths: [null, null, null, null, null],
+      metrics,
+      compact: false,
+    });
+    expect(overflowing.requiresHorizontalScrollFallback).toBe(true);
+    expect(overflowing.items).toHaveLength(5);
+  });
 });
 
 describe("retainWorkspaceTabMeasuredWidth", () => {
@@ -254,5 +289,17 @@ describe("resolveWorkspaceTabChipBackdrop", () => {
     expect(
       resolveWorkspaceTabChipBackdrop({ rail: "surface", isActiveFocused: false, isFilled: false }),
     ).toBe("surface0");
+  });
+});
+
+describe("scrollOffsetToRevealWorkspaceTab", () => {
+  it("reveals the selected tab after a wide row becomes an overflowing row", () => {
+    const widths = Array.from({ length: 6 }, () => 96);
+    expect(scrollOffsetToRevealWorkspaceTab(widths, 5, 482, 4, 4)).toBe(122);
+    expect(scrollOffsetToRevealWorkspaceTab(widths, 0, 482, 4, 4)).toBe(0);
+  });
+
+  it("keeps a selected tab in place when it already fits", () => {
+    expect(scrollOffsetToRevealWorkspaceTab([96, 160, 96], 1, 480, 4, 4)).toBe(0);
   });
 });

@@ -19,7 +19,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { AppState, useWindowDimensions, View } from "react-native";
+import { AppState, View, type LayoutChangeEvent } from "react-native";
 import { GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -51,6 +51,7 @@ import { FloatingPanelPortalHost } from "@/components/ui/floating-panel-portal";
 import { HostChooserModal, useHostChooser } from "@/hosts/host-chooser";
 import { HostConfirmationSheet } from "@/hosts/host-confirmation-sheet";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
+import { MeasuredWindowWidthProvider, useLayoutWindowWidth } from "@/constants/window-width";
 import {
   canDesktopAppSidebarShare,
   resolveDesktopAppChromeLayout,
@@ -88,6 +89,7 @@ import { useGlobalNewWorkspaceAction } from "@/hooks/use-global-new-workspace-ac
 import { useLatchedBoolean } from "@/hooks/use-latched-boolean";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
+import { useAdaptiveOrientation } from "@/orientation";
 import { KeyboardShiftProvider } from "@/keyboard/shift";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
@@ -351,9 +353,8 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const isFocusModeEnabled = usePanelStore((state) => state.desktop.focusModeEnabled);
   const isDesktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
-  const { width: windowWidth } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const viewportWidth = windowWidth - insets.left - insets.right;
+  const viewportWidth = useLayoutWindowWidth() - insets.left - insets.right;
 
   const cycleTheme = useCallback(() => {
     void updateSettings({ theme: getNextThemePreference(settings.theme) });
@@ -520,6 +521,9 @@ function AppContainerLifetime({
   children: ReactNode;
   compactGesturesEnabled: boolean;
 }) {
+  const isOrientationReady = useAdaptiveOrientation();
+  if (!isOrientationReady) return null;
+
   return (
     <ComposerEditingSessionsProvider>
       <CommandCenterProvider>
@@ -884,18 +888,25 @@ function RootProviders({ children }: { children: ReactNode }) {
 }
 
 function RootAppTree() {
+  const [measuredWindowWidth, setMeasuredWindowWidth] = useState<number | null>(null);
+  const handleRootLayout = useCallback((event: LayoutChangeEvent) => {
+    const width = event.nativeEvent.layout.width;
+    if (width > 0) setMeasuredWindowWidth((current) => (current === width ? current : width));
+  }, []);
   return (
-    <GestureHandlerRootView style={flexStyle}>
-      <View style={layoutStyles.surfaceFill}>
-        <LucideProvider strokeWidth={ICON_STROKE_WIDTH}>
-          <RootProviders>
-            <RuntimeProviders>
-              <AppShell />
-            </RuntimeProviders>
-          </RootProviders>
-        </LucideProvider>
-      </View>
-    </GestureHandlerRootView>
+    <MeasuredWindowWidthProvider width={measuredWindowWidth}>
+      <GestureHandlerRootView style={flexStyle} onLayout={handleRootLayout}>
+        <View style={layoutStyles.surfaceFill}>
+          <LucideProvider strokeWidth={ICON_STROKE_WIDTH}>
+            <RootProviders>
+              <RuntimeProviders>
+                <AppShell />
+              </RuntimeProviders>
+            </RootProviders>
+          </LucideProvider>
+        </View>
+      </GestureHandlerRootView>
+    </MeasuredWindowWidthProvider>
   );
 }
 
