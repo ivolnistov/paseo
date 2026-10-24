@@ -130,7 +130,7 @@ const edges = {
   relay: {},
 };
 
-function forkFixture() {
+function forkFixture({ webUi = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "paseo-fork-release-"));
   const src = join(root, "src");
   for (const [dir, [name]] of Object.entries(owned)) {
@@ -149,6 +149,14 @@ function forkFixture() {
     writeFileSync(
       join(src, "packages", dir, "dist", "index.js"),
       `export const name = ${JSON.stringify(name)};\n`,
+    );
+  }
+  // The server serves the daemon web UI built by scripts/build-daemon-web-ui.mjs into dist/server/web-ui.
+  if (webUi) {
+    mkdirSync(join(src, "packages", "server", "dist", "server", "web-ui"), { recursive: true });
+    writeFileSync(
+      join(src, "packages", "server", "dist", "server", "web-ui", "index.html"),
+      "<!doctype html>\n",
     );
   }
   writeFileSync(
@@ -412,6 +420,122 @@ test("a clean consumer resolves every internal edge, including plugin peers, to 
     console.log(`resolver receipt: ${JSON.stringify([...new Set(requests)])}`);
   } finally {
     server.close();
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+// ---- N8: artifact completeness, dispatch bindings and existing-version idempotence (prepare/plan-publish).
+test("prepare refuses a server package without the daemon web UI build", () => {
+  // A clean committed checkout whose server simply lacks the web UI output, so only completeness can refuse it.
+  const fx = forkFixture({ webUi: false });
+  try {
+    const result = run(fx, "prepare", "--src", fx.src, "--version", FORK_VERSION, "--out", fx.out);
+    assert.equal(
+      result.status,
+      3,
+      `prepare accepted a server without its web UI: ${result.stdout}${result.stderr}`,
+    );
+    assert.ok(
+      !existsSync(join(fx.out, "manifest.json")),
+      "no manifest for an incomplete artifact set",
+    );
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("the packed server carries the daemon web UI", () => {
+  const fx = prepared();
+  try {
+    const server = fx.manifest.packages.find((p) => p.sourceName === "@getpaseo/server");
+    const entries = execFileSync("tar", ["-tzf", join(fx.out, server.tarball)])
+      .toString()
+      .split("\n");
+    assert.ok(entries.includes("package/dist/server/web-ui/index.html"), entries.join(" "));
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+function plan(fx, ...extra) {
+  return run(
+    fx,
+    "plan-publish",
+    "--manifest",
+    fx.manifestPath,
+    "--registry",
+    GITHUB_PACKAGES,
+    ...extra,
+  );
+}
+
+test("plan-publish binds the dispatch version and source commit", () => {
+  const fx = prepared();
+  try {
+    const ok = plan(fx, "--version", FORK_VERSION, "--source-sha", fx.sha);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.notEqual(
+      plan(fx, "--version", "0.13.0-fork.2", "--source-sha", fx.sha).status,
+      0,
+      "version must match the dispatch input",
+    );
+    assert.notEqual(
+      plan(fx, "--version", FORK_VERSION, "--source-sha", "0".repeat(40)).status,
+      0,
+      "source must match the dispatch SHA",
+    );
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("plan-publish skips an identical existing version and refuses a differing one", () => {
+  const fx = prepared();
+  try {
+    const relay = fx.manifest.packages.find((p) => p.name === "@ivolnistov/paseo-relay");
+    const integrity = `sha512-${createHash("sha512")
+      .update(readFileSync(join(fx.out, relay.tarball)))
+      .digest("base64")}`;
+    const existing = (value) => {
+      const path = join(fx.root, `existing-${Math.random().toString(16).slice(2)}.json`);
+      // name@version -> dist.integrity as the registry reports it (npm view <name>@<version> dist.integrity)
+      writeFileSync(path, JSON.stringify({ [`${relay.name}@${relay.version}`]: value }));
+      return path;
+    };
+    const same = plan(
+      fx,
+      "--version",
+      FORK_VERSION,
+      "--source-sha",
+      fx.sha,
+      "--existing",
+      existing(integrity),
+    );
+    assert.equal(same.status, 0, same.stderr);
+    const relayLine = same.stdout
+      .split("\n")
+      .find((line) => line.includes("@ivolnistov/paseo-relay"));
+    assert.match(
+      relayLine ?? "",
+      /skip/i,
+      "an identical published version is skipped, not republished",
+    );
+    const other = same.stdout
+      .split("\n")
+      .find((line) => line.includes("@ivolnistov/paseo-protocol"));
+    assert.doesNotMatch(other ?? "", /skip/i, "versions not yet published are still planned");
+    const differs = plan(
+      fx,
+      "--version",
+      FORK_VERSION,
+      "--source-sha",
+      fx.sha,
+      "--existing",
+      existing("sha512-AAAA"),
+    );
+    assert.equal(differs.status, 4, "a different existing tarball for the same version is refused");
+    assert.ok(!existsSync(fx.calls) || !readFileSync(fx.calls, "utf8").includes("npm publish"));
+  } finally {
     rmSync(fx.root, { recursive: true, force: true });
   }
 });

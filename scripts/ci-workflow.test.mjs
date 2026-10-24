@@ -644,3 +644,99 @@ test("fork release credentials stay in their protected jobs", () => {
     );
   }
 });
+
+// ---- N8: release wiring. Workflow checks only; packer behaviour is covered by the packer's fixture tests.
+const releaseJobs = () => loadWorkflow("fork-release.yml").jobs;
+const stepsText = (job) => (job?.steps ?? []).map((step) => JSON.stringify(step));
+
+test("ci.yml runs with a read-only default token", () => {
+  assert.deepEqual(loadWorkflow("ci.yml").permissions, { contents: "read" });
+});
+
+test("release-apk adopts its dependency install instead of installing twice", () => {
+  const apk = releaseJobs()["release-apk"];
+  const build = stepsText(apk).find((step) => step.includes("scripts/build-apk.sh"));
+  assert.ok(build, "release-apk builds through build-apk.sh");
+  if (stepsText(apk).some((step) => /npm ci\b/.test(step))) {
+    assert.match(
+      build,
+      /--deps-receipt/,
+      "a job that already ran npm ci hands its receipt to build-apk.sh",
+    );
+  }
+});
+
+test("release-apk pins the source's SDK and NDK and keeps a secret-free Gradle cache", () => {
+  const apk = releaseJobs()["release-apk"];
+  const catalog = readFileSync(
+    new URL("node_modules/react-native/gradle/libs.versions.toml", repoRoot),
+    "utf8",
+  );
+  const pin = (key) => catalog.match(new RegExp(`^${key} = "([^"]+)"`, "m"))?.[1];
+  const text = JSON.stringify(apk.steps);
+  for (const key of ["ndkVersion", "buildTools"]) {
+    assert.ok(text.includes(pin(key)), `release-apk installs ${key} ${pin(key)}`);
+  }
+  assert.ok(
+    text.includes(`platforms;android-${pin("compileSdk")}`),
+    `release-apk installs android-${pin("compileSdk")}`,
+  );
+  const cache = (apk.steps ?? []).find((step) =>
+    /actions\/cache|gradle\/actions\/setup-gradle/.test(String(step.uses)),
+  );
+  assert.ok(cache, "release-apk keeps a persistent Gradle cache");
+  assert.ok(!usesSecrets(cache), "the cache step reads no secrets");
+  const paths = String(cache.with?.path ?? "");
+  for (const forbidden of ["keystore", ".npmrc", "google-services", "android/app", "storepass"]) {
+    assert.ok(!paths.includes(forbidden), `the cache holds no ${forbidden}`);
+  }
+});
+
+test("packing builds the daemon web UI before preparing the packages", () => {
+  const steps = stepsText(releaseJobs().pack);
+  const ui = steps.findIndex((step) => step.includes("build:daemon-web-ui"));
+  const prepare = steps.findIndex((step) => step.includes("fork-release.mjs prepare"));
+  assert.ok(ui >= 0 && prepare > ui, "build:daemon-web-ui runs before prepare");
+});
+
+test("pack and publish run only after checks of the exact dispatched commit", () => {
+  const jobs = releaseJobs();
+  const checks = [jobs.pack.needs]
+    .flat()
+    .filter((id) => id !== "validate")
+    .map((id) => jobs[id]);
+  assert.ok(
+    checks.some((job) =>
+      stepsText(job).some((step) => /npm run (typecheck|lint)|node --test|vitest run/.test(step)),
+    ),
+    "pack depends on a check job of this run",
+  );
+  for (const [id, job] of Object.entries(jobs)) {
+    for (const step of job.steps ?? []) {
+      if (String(step.uses).startsWith("actions/checkout")) {
+        assert.match(
+          JSON.stringify(step.with ?? {}),
+          /inputs\.sha|needs\.validate\.outputs/,
+          `${id} checks out the dispatched commit`,
+        );
+      }
+      if (String(step.uses).startsWith("actions/download-artifact")) {
+        assert.ok(
+          !("run-id" in (step.with ?? {})) && !("github-token" in (step.with ?? {})),
+          `${id} uses only this run's artifacts`,
+        );
+      }
+    }
+  }
+  const steps = stepsText(jobs["publish-packages"]);
+  const plans = steps.map((step, i) => [step, i]).filter(([step]) => step.includes("plan-publish"));
+  assert.ok(plans.length > 0, "publish-packages validates through plan-publish");
+  for (const [step] of plans) {
+    for (const flag of ["--version", "--source-sha"])
+      assert.ok(step.includes(flag), `every plan-publish binds ${flag}`);
+  }
+  const bound = plans.find(([step]) => step.includes("--existing"));
+  assert.ok(bound, "publish-packages binds plan-publish --existing");
+  const publishAt = steps.findIndex((step) => step.includes("npm publish"));
+  assert.ok(publishAt > bound[1], "the existing-version plan runs before npm publish");
+});
