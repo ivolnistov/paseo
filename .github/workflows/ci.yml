@@ -8,6 +8,10 @@ on:
   merge_group:
   workflow_dispatch:
 
+# Read-only token by default; no CI job needs to write.
+permissions:
+  contents: read
+
 # A newer push to the same ref cancels the run still in progress, main included.
 # A full run costs about 200 runner-minutes against the org's 20 concurrent
 # jobs, and a superseded main run only answers a question the newer commit

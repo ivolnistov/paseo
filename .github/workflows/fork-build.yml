@@ -65,6 +65,7 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build:server
+      - run: npm run build:daemon-web-ui
       - name: Pack the owned packages and validate the plan (never publishes)
         env:
           RUN_NUMBER: ${{ github.run_number }}
@@ -72,4 +73,4 @@ jobs:
           version="0.0.0-ci.${RUN_NUMBER}"
           node scripts/fork-release.mjs prepare --src . --version "$version" --out "$RUNNER_TEMP/packages"
           node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
-            --registry https://npm.pkg.github.com
+            --registry https://npm.pkg.github.com --version "$version" --source-sha "$(git rev-parse HEAD)"

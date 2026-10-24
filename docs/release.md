@@ -53,12 +53,16 @@ The upstream release, deploy and publish workflows run only in `getpaseo/paseo`.
 workflows and never runs the root `release:publish` script:
 
 - `fork-build.yml` is read-only: static checks, the server identity suites and a package dry run.
-- `fork-release.yml` is dispatched by hand with a pushed `tag`, its full `sha` and an exact package `version`. It
-  checks that the tag points at the SHA and that the SHA is on `main`. It packs the seven `@ivolnistov/*` packages
-  with `scripts/fork-release.mjs` (internal `@getpaseo/*` keys alias the owned packages) and validates them with
-  `plan-publish`. It then builds the APK with `scripts/build-apk.sh` in a protected environment and publishes the
-  packages to `https://npm.pkg.github.com`. The GitHub release is only a draft, whose text the owner approves
-  before publication.
+- `fork-release.yml` is dispatched by hand with a pushed `tag`, its full `sha` and an exact package `version`.
+  - It checks that the tag points at the SHA and that the SHA is on `main`, then runs lint, typecheck and the
+    release contracts on that SHA.
+  - Only then does it pack the seven `@ivolnistov/*` packages with `scripts/fork-release.mjs` (internal
+    `@getpaseo/*` keys alias the owned packages; the server needs `npm run build:daemon-web-ui` first). It validates
+    them with `plan-publish --version --source-sha`.
+  - It builds the APK with `scripts/build-apk.sh` in a protected environment, and publishes to
+    `https://npm.pkg.github.com` only the versions the registry does not already have. An identical published
+    version is skipped; a different one stops the release.
+  - The GitHub release is only a draft, whose text the owner approves before publication.
 - The app version comes from `packages/app/package.json` at that SHA; the fork package version is the `version`
   input. The manifest and the job log record both.
 

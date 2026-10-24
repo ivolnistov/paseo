@@ -58,11 +58,11 @@ class Stop extends Error {
   }
 }
 
-function parseArgs(argv, names) {
+function parseArgs(argv, names, optional = []) {
   const out = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, "");
-    if (!names.includes(key) || argv[i + 1] === undefined)
+    if (![...names, ...optional].includes(key) || argv[i + 1] === undefined)
       throw new Stop(2, `unexpected argument ${argv[i]}`);
     out[key] = argv[i + 1];
   }
@@ -146,6 +146,8 @@ function prepare(argv) {
       const required = [pkg.main, ...(pkg.files ?? [])].filter(
         (f) => typeof f === "string" && !f.includes("*"),
       );
+      // The daemon serves its web UI from dist/server/web-ui (npm run build:daemon-web-ui).
+      if (dir === "server") required.push("dist/server/web-ui/index.html");
       const missing = required.filter((f) => !existsSync(path.join(pkgDir, f)));
       if (missing.length) {
         throw new Stop(
@@ -291,8 +293,27 @@ function validate(manifest, baseDir) {
   return problems;
 }
 
+// --existing: JSON map "name@version" -> the registry's dist.integrity (sha512) for versions already published.
+function readExisting(file) {
+  if (!file) return {};
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync(path.resolve(file), "utf8"));
+  } catch (error) {
+    throw new Stop(3, `cannot read --existing ${file}: ${error.message}`);
+  }
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+    throw new Stop(3, "--existing must be a JSON object of name@version to integrity");
+  }
+  return existing;
+}
+
+function sha512Integrity(file) {
+  return `sha512-${createHash("sha512").update(readFileSync(file)).digest("base64")}`;
+}
+
 function planPublish(argv) {
-  const args = parseArgs(argv, ["manifest", "registry"]);
+  const args = parseArgs(argv, ["manifest", "registry"], ["version", "source-sha", "existing"]);
   if (args.registry !== REGISTRY)
     throw new Stop(4, `registry must be exactly ${REGISTRY}: ${args.registry}`);
   const manifestPath = path.resolve(args.manifest);
@@ -303,14 +324,37 @@ function planPublish(argv) {
     throw new Stop(3, `cannot read ${manifestPath}: ${error.message}`);
   }
   const problems = validate(manifest, path.dirname(manifestPath));
-  if (problems.length) throw new Stop(4, `manifest rejected:\n  ${problems.join("\n  ")}`);
-  const byName = Object.fromEntries(manifest.packages.map((p) => [p.name, p]));
-  for (const name of PUBLISH_ORDER) {
-    const entry = byName[name];
-    console.log(
-      `would publish ${name}@${entry.version} from ${entry.tarball} (sha256 ${entry.sha256}) to ${REGISTRY}`,
+  // The dispatch inputs the manifest must have been prepared for.
+  if (args.version !== undefined && args.version !== manifest.version) {
+    problems.push(`manifest version ${manifest.version} is not --version ${args.version}`);
+  }
+  if (args["source-sha"] !== undefined && args["source-sha"] !== manifest.source?.sha) {
+    problems.push(
+      `manifest source ${manifest.source?.sha} is not --source-sha ${args["source-sha"]}`,
     );
   }
+  if (problems.length) throw new Stop(4, `manifest rejected:\n  ${problems.join("\n  ")}`);
+  const existing = readExisting(args.existing);
+  const byName = Object.fromEntries(manifest.packages.map((p) => [p.name, p]));
+  const lines = [];
+  for (const name of PUBLISH_ORDER) {
+    const entry = byName[name];
+    const published = existing[`${name}@${entry.version}`];
+    const integrity = sha512Integrity(path.resolve(path.dirname(manifestPath), entry.tarball));
+    if (published !== undefined && published !== integrity) {
+      throw new Stop(
+        4,
+        `${name}@${entry.version} is already published with different contents (${published})`,
+      );
+    }
+    // An identical published version is skipped, so a retried release does not republish it.
+    lines.push(
+      published === undefined
+        ? `would publish ${name}@${entry.version} from ${entry.tarball} (sha256 ${entry.sha256}) to ${REGISTRY}`
+        : `skip ${name}@${entry.version}: already published with identical integrity`,
+    );
+  }
+  for (const line of lines) console.log(line);
   console.log(`plan only: source ${manifest.source.sha}; nothing was published`);
 }
 
