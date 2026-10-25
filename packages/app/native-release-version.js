@@ -1,4 +1,4 @@
-const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/;
+const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+)|-fork\.(\d+))?$/;
 const stableIosBuildSlot = 999;
 const FDROID_ABI_VERSION_CODE_SUFFIXES = {
   "armeabi-v7a": 1,
@@ -13,11 +13,19 @@ function getNativeReleaseVersion(version) {
     throw new Error(`Cannot derive native release version from unsupported version: ${version}`);
   }
 
-  const [, majorText, minorText, patchText, betaText] = match;
+  const [, majorText, minorText, patchText, betaText, forkText] = match;
   const major = Number(majorText);
   const minor = Number(minorText);
   const patch = Number(patchText);
   const betaNumber = betaText === undefined ? null : Number(betaText);
+  // Owned fork builds (Android only) take code base + fork number, e.g. 0.13.0-fork.2 -> 13002. Root policy: this
+  // can equal a later upstream patch code; the fork ships on its own certificate and channel.
+  const forkNumber = forkText === undefined ? null : Number(forkText);
+  if (forkNumber !== null && (forkNumber < 1 || patch + forkNumber > 999)) {
+    throw new Error(
+      `Fork number must be at least 1 and keep the patch slot within 999: ${version}`,
+    );
+  }
 
   if (minor > 999 || patch > 999) {
     throw new Error(`Cannot derive collision-free native version from: ${version}`);
@@ -26,7 +34,7 @@ function getNativeReleaseVersion(version) {
     throw new Error(`iOS beta number must be between 1 and 998: ${version}`);
   }
 
-  const versionCode = major * 1_000_000 + minor * 1_000 + patch;
+  const versionCode = major * 1_000_000 + minor * 1_000 + patch + (forkNumber ?? 0);
   if (
     !Number.isSafeInteger(versionCode) ||
     versionCode <= 0 ||
@@ -36,7 +44,8 @@ function getNativeReleaseVersion(version) {
   }
 
   const iosBuildSlot = betaNumber ?? stableIosBuildSlot;
-  const iosBuildNumber = versionCode * 1_000 + iosBuildSlot;
+  const iosBaseCode = major * 1_000_000 + minor * 1_000 + patch; // forks are not iOS releases; iOS stays numeric
+  const iosBuildNumber = iosBaseCode * 1_000 + iosBuildSlot;
   if (!Number.isSafeInteger(iosBuildNumber)) {
     throw new Error(`Derived iOS buildNumber is out of range: ${iosBuildNumber}`);
   }
@@ -45,6 +54,7 @@ function getNativeReleaseVersion(version) {
     appVersion: `${major}.${minor}.${patch}`,
     androidVersionCode: versionCode,
     iosBuildNumber: String(iosBuildNumber),
+    ...(forkNumber === null ? {} : { androidVersionName: version }),
   };
 }
 

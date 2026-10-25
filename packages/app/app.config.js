@@ -4,6 +4,7 @@ const pkg = require("./package.json");
 const withAndroidAsyncStorageSize = require("./plugins/with-android-async-storage-size");
 const withAndroidOptionalCamera = require("./plugins/with-android-optional-camera");
 const withAndroidProfileable = require("./plugins/with-android-profileable");
+const withAndroidVersionName = require("./plugins/with-android-version-name");
 const withAndroidFoldConfiguration = require("./plugins/with-android-fold-configuration");
 const withFdroidAutolinking = require("./plugins/with-fdroid-autolinking");
 const withPasteInput = require("./plugins/with-paste-input");
@@ -157,6 +158,7 @@ export default {
       withAndroidScroll,
       withAndroidHardwareKeyboard,
       [withAndroidAsyncStorageSize, 64],
+      [withAndroidVersionName, nativeReleaseVersion.androidVersionName],
       ...buildProfile.cameraPlugins,
       withAndroidOptionalCamera,
       [

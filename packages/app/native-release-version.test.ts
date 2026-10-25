@@ -44,3 +44,35 @@ describe("native release version", () => {
     ]);
   });
 });
+
+describe("fork release versions", () => {
+  // Root policy: owned fork build sequence 13003 for this APK (not globally collision-free: upstream 0.13.3 maps to
+  // the same code; the fork ships on a different certificate/channel). The numeric version stays numeric for iOS
+  // and the shared config; the full fork name is an Android-only versionName. `androidVersionName` is proposed.
+  it("0.13.0-fork.3 maps to Android code 13003 with the full fork versionName; shared version stays numeric", () => {
+    expect(getNativeReleaseVersion("0.13.0-fork.3")).toMatchObject({
+      appVersion: "0.13.0",
+      androidVersionCode: 13003,
+      androidVersionName: "0.13.0-fork.3",
+    });
+  });
+
+  it("rejects a fork number of 0 and a fork that would leave the patch slot", () => {
+    expect(() => getNativeReleaseVersion("0.13.0-fork.0")).toThrow(/Fork number/);
+    expect(() => getNativeReleaseVersion("0.13.998-fork.2")).toThrow(/Fork number/);
+    expect(getNativeReleaseVersion("0.13.997-fork.2").androidVersionCode).toBe(13999);
+  });
+
+  it("stable and beta mappings are unchanged by fork support", () => {
+    expect(getNativeReleaseVersion("0.13.0")).toEqual({
+      appVersion: "0.13.0",
+      androidVersionCode: 13000,
+      iosBuildNumber: "13000999",
+    });
+    expect(getNativeReleaseVersion("0.13.0-beta.2")).toEqual({
+      appVersion: "0.13.0",
+      androidVersionCode: 13000,
+      iosBuildNumber: "13000002",
+    });
+  });
+});

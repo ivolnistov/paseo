@@ -238,7 +238,7 @@ PY
 native_version() {
   node -e 'const m = require(process.argv[1]); const r = m.getNativeReleaseVersion(process.argv[2]);
     if (!r || !r.appVersion || !Number.isSafeInteger(r.androidVersionCode)) process.exit(1);
-    console.log(`${r.appVersion} ${r.androidVersionCode}`);' "$APP/native-release-version.js" "$VERSION"
+    console.log(`${r.androidVersionName ?? r.appVersion} ${r.androidVersionCode}`);' "$APP/native-release-version.js" "$VERSION"
 }
 
 # Lowercase hex SHA-256 of the keystore's certificate; the password goes to keytool only as a file.
