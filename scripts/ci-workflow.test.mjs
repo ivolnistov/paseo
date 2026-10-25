@@ -740,3 +740,14 @@ test("pack and publish run only after checks of the exact dispatched commit", ()
   const publishAt = steps.findIndex((step) => step.includes("npm publish"));
   assert.ok(publishAt > bound[1], "the existing-version plan runs before npm publish");
 });
+
+// npm refuses to publish a prerelease version (every fork version, e.g. 0.13.0-fork.N) without an explicit
+// dist-tag: "You must specify a tag using --tag when publishing a prerelease version". The owned packages keep
+// the default channel the self-updater installs from (`@ivolnistov/paseo@latest`).
+test("the owned publish command names the latest dist-tag explicitly", () => {
+  const publish = stepsText(releaseJobs()["publish-packages"]).find((step) =>
+    /npm publish\b/.test(step),
+  );
+  assert.ok(publish, "publish-packages runs npm publish");
+  assert.match(publish, /npm publish[^\n]*--tag latest\b/, "npm publish passes --tag latest");
+});

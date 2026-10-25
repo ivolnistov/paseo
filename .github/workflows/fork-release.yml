@@ -269,7 +269,7 @@ jobs:
             }
           ' "$RUNNER_TEMP/packages/manifest.json" "$RUNNER_TEMP/existing.json" | while read -r tarball; do
             npm publish "$RUNNER_TEMP/packages/$tarball" --userconfig "$RUNNER_TEMP/npmrc" \
-              --registry https://npm.pkg.github.com --ignore-scripts
+              --registry https://npm.pkg.github.com --tag latest --ignore-scripts
           done
           rm -f "$RUNNER_TEMP/npmrc"
 
