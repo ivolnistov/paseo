@@ -152,7 +152,7 @@ Hub CLI credentials are bearer secrets. Remote Hub origins must use HTTPS; clear
 ## Recommendations
 
 - **Use the relay** for mobile access, it's the simplest option and all traffic is end-to-end encrypted
-- **Treat the QR code like a password**, anyone with the pairing offer can connect to your daemon unless you also set a password
+- **Treat the QR code like a password**, anyone with the pairing offer can connect to your daemon. In this owner fork a daemon password does not stop that over the relay: a relay client without a credential is admitted as owner
 - **Set a password** if you bind to a network address, it prevents unauthorized clients from controlling your agents
 - **Never bind to 0.0.0.0 without a password**, without one, any device on your network can connect
 - **Scope Docker mounts tightly**, agents can access mounted workspaces and provider credentials

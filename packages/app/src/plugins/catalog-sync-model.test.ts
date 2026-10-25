@@ -556,8 +556,9 @@ it("a subscription snapshot still refreshes retained host settings when the cata
   const options = settingsQuery(plugin);
   await plugin.queryClient.fetchQuery(options); // retained and inactive: no observer
   h.client.settings.write({ revision: "1", values: { label: "missed" } });
-  const fetches = h.client.fetches;
+  let attempts = 0;
   Reflect.set(h.client, "getPluginCatalog", async () => {
+    attempts++;
     throw new Error("catalog unavailable");
   });
   h.client.snapshot();
@@ -566,7 +567,7 @@ it("a subscription snapshot still refreshes retained host settings when the cata
     .toEqual({ status: "ready", revision: "2", values: { label: "missed" } });
   expect(h.installed()).toBe(plugin);
   expect(h.evaluations()).toBe(1);
-  expect(h.client.fetches).toBe(fetches);
+  expect(attempts).toBe(1);
 });
 
 it("a snapshot refreshes every settings key of every plugin on the host, exactly once each", async () => {

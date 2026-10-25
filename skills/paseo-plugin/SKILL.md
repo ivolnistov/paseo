@@ -544,7 +544,7 @@ export function contributeClient(client: PluginClientContext) {
 }
 ```
 
-Call `contributeClient(client)` from `index.client.tsx`, or move its body into that entry. The `button` descriptor sets the icon, label, and behavior; Paseo owns the pressable, chrome, pending state, error reporting, and placement. `addComposerPill` returns a registration with `update()` and `remove()`. `remove()` is idempotent, and Paseo removes every pill when the plugin, client entrypoint, or host connection is torn down.
+Call `contributeClient(client)` from `index.client.tsx`, or move its body into that entry. The `button` descriptor sets the icon, label, and behavior; Paseo owns the pressable, chrome, pending state, error reporting, and placement. `addComposerPill` returns a registration with `update()` and `remove()`. `remove()` is idempotent, and Paseo removes every pill when the plugin installation is torn down; a temporary disconnect of the same client keeps them.
 
 ## Transform and render timeline items
 

@@ -48,7 +48,7 @@ describe("native release version", () => {
 describe("fork release versions", () => {
   // Root policy: owned fork build sequence 13003 for this APK (not globally collision-free: upstream 0.13.3 maps to
   // the same code; the fork ships on a different certificate/channel). The numeric version stays numeric for iOS
-  // and the shared config; the full fork name is an Android-only versionName. `androidVersionName` is proposed.
+  // and the shared config; the full fork name is the returned Android-only `androidVersionName`.
   it("0.13.0-fork.3 maps to Android code 13003 with the full fork versionName; shared version stays numeric", () => {
     expect(getNativeReleaseVersion("0.13.0-fork.3")).toMatchObject({
       appVersion: "0.13.0",
