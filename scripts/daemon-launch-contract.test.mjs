@@ -239,15 +239,17 @@ test("prepare packs exactly the seven owned packages with exact aliased internal
       assert.equal(pkg.name, entry.name);
       assert.equal(pkg.version, FORK_VERSION);
       assert.equal(pkg.publishConfig?.registry, GITHUB_PACKAGES);
-      for (const section of ["dependencies", "optionalDependencies"]) {
-        for (const [key, spec] of Object.entries(pkg[section] ?? {})) {
-          if (!key.startsWith("@getpaseo/")) continue;
-          assert.equal(
-            spec,
-            `npm:${targetOf[key]}@${FORK_VERSION}`,
-            `${entry.name} ${section} ${key}`,
-          );
-        }
+      const internalEdges = ["dependencies", "optionalDependencies"].flatMap((section) =>
+        Object.entries(pkg[section] ?? {})
+          .filter(([key]) => key.startsWith("@getpaseo/"))
+          .map(([key, spec]) => ({ section, key, spec })),
+      );
+      for (const { section, key, spec } of internalEdges) {
+        assert.equal(
+          spec,
+          `npm:${targetOf[key]}@${FORK_VERSION}`,
+          `${entry.name} ${section} ${key}`,
+        );
       }
     }
     // Plugin peers are recorded for an actual npm resolver proof (next slice); they are never left as a bare
