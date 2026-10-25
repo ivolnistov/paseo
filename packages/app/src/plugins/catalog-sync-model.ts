@@ -9,7 +9,7 @@ import { pluginSettingsKey, pluginSettingsPrefix } from "./settings/query";
 
 interface CatalogSyncInput {
   serverId: string;
-  client: Pick<DaemonClient, "getPluginCatalog" | "observeEvents">;
+  client: DaemonClient;
   audio: Pick<AudioEngine, "play"> | null;
   connected: boolean;
   supported: boolean;
@@ -49,7 +49,7 @@ export function syncPluginCatalog({
   if (!connected) return () => {};
   // SessionProvider creates the catch-up owner in an effect; observe only after it is published.
   if (!catchUp) return () => {};
-  const installationOptions = { client: client as DaemonClient, audio };
+  const installationOptions = { client, audio };
   let cancelled = false;
   let snapshotPending = false;
   let refreshQueue = Promise.resolve();
@@ -68,20 +68,19 @@ export function syncPluginCatalog({
   function refresh(replacePluginId?: string) {
     const afterSnapshot = snapshotPending;
     snapshotPending = false;
-    refreshQueue = refreshQueue.then(() =>
-      client
-        .getPluginCatalog(bundles)
-        .then((catalog) => {
-          if (cancelled) return undefined;
+    refreshQueue = refreshQueue.then(async () => {
+      try {
+        const catalog = await client.getPluginCatalog(bundles);
+        if (!cancelled) {
           registry.installCatalog(serverId, catalog, { ...installationOptions, replacePluginId });
-          if (afterSnapshot) invalidateHostSettings();
-          return undefined;
-        })
-        .catch((error) => {
-          if (!cancelled) console.warn(`[Plugins] Failed to load catalog for ${serverId}`, error);
-          return undefined;
-        }),
-    );
+        }
+      } catch (error) {
+        if (!cancelled) console.warn(`[Plugins] Failed to load catalog for ${serverId}`, error);
+      }
+      // Retained installations still need fresh settings after a snapshot, even if the catalog fetch failed.
+      if (afterSnapshot && !cancelled) invalidateHostSettings();
+      return undefined;
+    });
   }
 
   const catalogRefresh = createCatalogRefresh({ catchUp, refresh, schedule });

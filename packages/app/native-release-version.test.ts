@@ -54,6 +54,7 @@ describe("fork release versions", () => {
       appVersion: "0.13.0",
       androidVersionCode: 13003,
       androidVersionName: "0.13.0-fork.3",
+      iosBuildNumber: "13000999",
     });
   });
 

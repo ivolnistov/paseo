@@ -23,7 +23,7 @@ The base version code comes from the package version:
 major * 1_000_000 + minor * 1_000 + patch
 ```
 
-Prerelease metadata is ignored, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. The same value is used as the iOS `buildNumber` because `packages/app/eas.json` uses EAS's local app version source. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
+Stable and beta versions use that base as the Android version code, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. Owned fork builds (`X.Y.Z-fork.N`) are Android only: their version code is the base plus `N`, and their Android versionName is the full fork version. The iOS `buildNumber` is `base * 1000 + slot`, where the slot is `999` for stable and the beta number for betas; the shared Expo `version` stays the numeric base. Both are set from the helper above because `packages/app/eas.json` uses EAS's local app version source. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
 
 The formula reserves three digits each for minor and patch. If either reaches `1000`, change the formula before cutting that release.
 

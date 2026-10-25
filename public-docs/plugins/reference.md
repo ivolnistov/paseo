@@ -628,7 +628,7 @@ export default function contribute(client: PluginClientContext) {
 }
 ```
 
-Cleanup can be async. Release timers, watchers, sockets, and other resources created by the plugin. Paseo also removes registrations, unmounts surfaces, rejects pending RPCs, closes the plugin's daemon session, and stops its subprocess on reload, disable, removal, disconnect, or daemon shutdown.
+Cleanup can be async. Release timers, watchers, sockets, and other resources created by the plugin. Paseo also removes registrations, unmounts surfaces, rejects pending RPCs, closes the plugin's daemon session, and stops its subprocess on reload, disable, removal, disconnect, or daemon shutdown. A temporary client disconnect from the same host is not a teardown: the app keeps the installation and its query state.
 
 ## Lifecycle hooks
 

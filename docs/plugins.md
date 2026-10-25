@@ -336,7 +336,9 @@ export default function contribute(client: PluginClientContext) {
 The contribution function must return cleanup. Server cleanup may be async; Paseo waits for it when
 the plugin is reloaded, disabled, removed, disconnected, or shut down. Cleanup is for resources
 created by plugin code. Paseo removes registered contributions, unmounts surfaces, clears query
-state, rejects pending RPCs, closes the plugin's daemon session, and stops the subprocess. Cleanup
+state, rejects pending RPCs, closes the plugin's daemon session, and stops the subprocess. A
+temporary client disconnect from the same host is not a teardown: the app keeps its installation and
+query state. Cleanup
 errors are logged and do not interrupt host teardown.
 
 Paseo owns the route, screen header, icon validation, close action, theme DTO, layout facts,
@@ -617,8 +619,9 @@ demand. Provider and project `subscribe()` calls establish their own demand. On 
 list-and-subscribe call has its own server ID, even for the same query. Older daemons retain
 [shared delivery behavior](protocol-compatibility.md#owned-observations). Handle snapshots
 also run after reconnect; replace your view before applying its subsequent updates. An installation
-stays loaded while its host is disconnected, and reconnecting runs setup again only when the client
-bundle changed, so refresh state from those snapshots rather than from setup. The installation
+stays loaded while its host is disconnected. Reconnecting runs setup again only when the client
+bundle, its `requirements.paseo` result or the host's client changed, so refresh state from those
+snapshots rather than from setup. The installation
 owns every observation created through its API and releases them on unload, including setup failure.
 Mounted surfaces and command invocations have shorter API lifetimes.
 

@@ -42,7 +42,7 @@ The daemon requires a valid cryptographic handshake before processing any comman
 
 The QR code or pairing link is the trust anchor. It contains the daemon's public key, which is required to establish the encrypted connection. Treat it like a password — don't share it publicly.
 
-When a daemon password is configured, relay clients send it in the encrypted `hello` message, so the relay never sees it. The daemon rejects a relay client that sends a wrong password or none, so a leaked pairing link alone does not grant access to a password-protected daemon.
+Relay clients that supply the daemon password send it in the encrypted `hello` message, so the relay never sees it. The daemon rejects a relay client that sends a wrong password. In this owner fork, a relay client that sends no credential is admitted as owner (`COMPAT(relayPasswordOptional)`), so the pairing link alone grants owner access over the relay; direct connections still require the password.
 
 ## Local daemon trust boundary
 

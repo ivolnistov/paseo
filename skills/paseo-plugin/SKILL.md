@@ -478,7 +478,7 @@ The callback receives the same context as the matching Command Center item plus 
 
 ## Add a composer pill
 
-A pill is a per-agent button in the composer track bar next to Tasks and Subagents. Add and remove pills from the client entry lifecycle. `addComposerPill` exists on `PluginClientContext`.
+A pill is a per-agent button in the composer track bar next to Tasks and Subagents. Add and remove pills from the client entry lifecycle; a temporary host disconnect keeps them. `addComposerPill` exists on `PluginClientContext`.
 
 ```tsx
 import type { PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";

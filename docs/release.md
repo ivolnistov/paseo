@@ -64,7 +64,8 @@ workflows and never runs the root `release:publish` script:
     version is skipped; a different one stops the release.
   - The GitHub release is only a draft, whose text the owner approves before publication.
 - The app version comes from `packages/app/package.json` at that SHA; the fork package version is the `version`
-  input. The manifest and the job log record both.
+  input. The manifest and the job log record both. For the APK identity of a fork version, see
+  [Android](android.md).
 
 ## Release branch discipline
 

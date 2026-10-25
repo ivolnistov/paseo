@@ -122,6 +122,8 @@ describe("PluginRegistry", () => {
     const clientBundle = timelineBundle("one");
     pluginRegistry.installCatalog("host-a", [{ id: "reports", clientBundle }]);
     const snapshot = pluginRegistry.getSnapshot();
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0]?.timelineTransformers.length).toBeGreaterThan(0);
     const transformers = snapshot[0]?.timelineTransformers;
     const listener = vi.fn();
     const unsubscribe = pluginRegistry.subscribe(listener);

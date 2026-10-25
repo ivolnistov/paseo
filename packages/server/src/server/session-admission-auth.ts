@@ -19,8 +19,8 @@ export async function resolveSessionAdmission(input: {
     return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
   }
   if (!credential) {
-    // COMPAT(relayPasswordOptional): owner-fork restoration of the branch upstream #7668 removed; a relay hello with
-    // no credential is the owner. Remove when the owner ends this compatibility exception.
+    // COMPAT(relayPasswordOptional): added in 0.13.0-fork.3, an owner-fork restoration of the branch upstream #7668
+    // removed; a relay hello with no credential is the owner. Remove when the owner ends this compatibility exception.
     if (transport === "relay") {
       return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
     }

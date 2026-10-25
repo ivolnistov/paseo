@@ -549,3 +549,57 @@ it("a new client for the same host replaces the unchanged installation and dispo
   expect(h.disposals()).toBe(1);
   expect(h.evaluations()).toBe(2);
 });
+
+it("a subscription snapshot still refreshes retained host settings when the catalog fetch rejects", async () => {
+  const h = await connected();
+  const plugin = h.installed();
+  const options = settingsQuery(plugin);
+  await plugin.queryClient.fetchQuery(options); // retained and inactive: no observer
+  h.client.settings.write({ revision: "1", values: { label: "missed" } });
+  const fetches = h.client.fetches;
+  Reflect.set(h.client, "getPluginCatalog", async () => {
+    throw new Error("catalog unavailable");
+  });
+  h.client.snapshot();
+  await expect
+    .poll(() => plugin.queryClient.getQueryData(options.queryKey))
+    .toEqual({ status: "ready", revision: "2", values: { label: "missed" } });
+  expect(h.installed()).toBe(plugin);
+  expect(h.evaluations()).toBe(1);
+  expect(h.client.fetches).toBe(fetches);
+});
+
+it("a snapshot refreshes every settings key of every plugin on the host, exactly once each", async () => {
+  const h = harness();
+  h.client.catalog = [...catalog("one"), { ...catalog("two")[0], id: "notes" }];
+  h.sync();
+  await expect.poll(() => h.registry.getSnapshot().length).toBe(2);
+  const reports = h.registry.getSnapshot().find((plugin) => plugin.id === "reports");
+  const notes = h.registry.getSnapshot().find((plugin) => plugin.id === "notes");
+  if (!reports || !notes) throw new Error("Missing installations");
+  const reads = { reportsPreferences: 0, reportsLayout: 0, notesPreferences: 0 };
+  function counting(key: keyof typeof reads, settingsId: string) {
+    return {
+      queryKey: pluginSettingsKey(settingsId),
+      queryFn: async () => ++reads[key],
+      gcTime: Infinity,
+      staleTime: Infinity,
+      retry: false,
+    } as const;
+  }
+  // Inactive replicas: no observers, so only an invalidation with refetchType "all" reaches them.
+  await reports.queryClient.fetchQuery(counting("reportsPreferences", "preferences"));
+  await reports.queryClient.fetchQuery(counting("reportsLayout", "layout"));
+  await notes.queryClient.fetchQuery(counting("notesPreferences", "preferences"));
+  const snapshot = h.registry.getSnapshot();
+  const fetches = h.client.fetches;
+
+  h.client.snapshot();
+
+  await expect
+    .poll(() => reads)
+    .toEqual({ reportsPreferences: 2, reportsLayout: 2, notesPreferences: 2 });
+  expect(h.client.fetches).toBe(fetches + 1);
+  expect(h.registry.getSnapshot()).toBe(snapshot);
+  expect(h.evaluations()).toBe(2);
+});
