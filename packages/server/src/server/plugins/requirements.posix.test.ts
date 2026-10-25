@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -68,8 +69,16 @@ it("rejects incompatible installs without persisting them, then accepts the corr
   await expect(service.installDirectory({ path: root })).resolves.toMatchObject({
     status: "running",
   });
-  expect(service.catalog()).toEqual([
-    { id: "example", requirements: { paseo: "^0.8.0" }, clientBundle: expect.any(String) },
+  const catalog = service.catalog();
+  expect(catalog).toEqual([
+    {
+      id: "example",
+      requirements: { paseo: "^0.8.0" },
+      clientBundle: expect.any(String),
+      clientBundleHash: createHash("sha256")
+        .update(catalog[0]?.clientBundle ?? "")
+        .digest("hex"),
+    },
   ]);
 });
 
