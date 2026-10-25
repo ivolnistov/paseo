@@ -2346,8 +2346,9 @@ Hiding preserves the registration, so showing it again restores its position. It
 an action already in progress.
 
 `remove()` is idempotent. Updates after removal do nothing. Paseo removes outstanding buttons when
-the plugin installation or host connection is torn down. Return cleanup from the client entry for
-your subscriptions, timers, and other resources.
+the plugin installation is torn down. A temporary disconnect of the same host connection keeps the
+installation and its buttons. Return cleanup from the client entry for your subscriptions, timers,
+and other resources.
 
 ## Use the Paseo SDK
 
@@ -2675,8 +2676,9 @@ Plugins are installed per daemon. When the same contribution exists on several c
 Attachment sources remain scoped to each composer's host.
 
 Workspace panels and Command Center items stay scoped to the active host and exact cached context.
-Reload replaces their registrations. Disable, removal, host disconnect, and evaluation failure
-remove Command Center items and clear the installation's query state. An already-restored panel tab
+Reload replaces their registrations. Disable, removal, host removal, and evaluation failure
+remove Command Center items and clear the installation's query state. A temporary disconnect keeps
+the installation, its items and its query state; on reconnect Paseo refetches its settings. An already-restored panel tab
 remains as unavailable until its matching contribution returns or the user closes it. Panel render
 failures stay inside the plugin error boundary.
 
