@@ -1,5 +1,14 @@
 const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+)|-fork\.(\d+))?$/;
 const stableIosBuildSlot = 999;
+// Owned fork builds (Android only) take their versionCode from this table, one entry per released fork version.
+// It must only grow: a new entry needs a code above every shipped one, so the APK installs as an update. The fork
+// counter can restart on a new upstream base (0.13.1-fork.1). A fork version without an entry is refused.
+const FORK_ANDROID_VERSION_CODES = {
+  "0.13.0-fork.2": 13002,
+  "0.13.0-fork.3": 13003,
+  "0.13.0-fork.4": 13004,
+  "0.13.1-fork.1": 13005,
+};
 const FDROID_ABI_VERSION_CODE_SUFFIXES = {
   "armeabi-v7a": 1,
   "arm64-v8a": 2,
@@ -18,8 +27,6 @@ function getNativeReleaseVersion(version) {
   const minor = Number(minorText);
   const patch = Number(patchText);
   const betaNumber = betaText === undefined ? null : Number(betaText);
-  // Owned fork builds (Android only) take code base + fork number, e.g. 0.13.0-fork.2 -> 13002. Root policy: this
-  // can equal a later upstream patch code; the fork ships on its own certificate and channel.
   const forkNumber = forkText === undefined ? null : Number(forkText);
   if (forkNumber !== null && (forkNumber < 1 || patch + forkNumber > 999)) {
     throw new Error(
@@ -34,7 +41,14 @@ function getNativeReleaseVersion(version) {
     throw new Error(`iOS beta number must be between 1 and 998: ${version}`);
   }
 
-  const versionCode = major * 1_000_000 + minor * 1_000 + patch + (forkNumber ?? 0);
+  const baseCode = major * 1_000_000 + minor * 1_000 + patch;
+  let versionCode = baseCode;
+  if (forkNumber !== null) {
+    if (!Object.hasOwn(FORK_ANDROID_VERSION_CODES, version)) {
+      throw new Error(`No Android versionCode is allocated for fork version: ${version}`);
+    }
+    versionCode = FORK_ANDROID_VERSION_CODES[version];
+  }
   if (
     !Number.isSafeInteger(versionCode) ||
     versionCode <= 0 ||

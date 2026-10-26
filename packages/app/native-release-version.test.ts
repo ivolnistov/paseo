@@ -46,22 +46,50 @@ describe("native release version", () => {
 });
 
 describe("fork release versions", () => {
-  // Root policy: owned fork build sequence 13003 for this APK (not globally collision-free: upstream 0.13.3 maps to
-  // the same code; the fork ships on a different certificate/channel). The numeric version stays numeric for iOS
-  // and the shared config; the full fork name is the returned Android-only `androidVersionName`.
-  it("0.13.0-fork.3 maps to Android code 13003 with the full fork versionName; shared version stays numeric", () => {
-    expect(getNativeReleaseVersion("0.13.0-fork.3")).toMatchObject({
-      appVersion: "0.13.0",
-      androidVersionCode: 13003,
-      androidVersionName: "0.13.0-fork.3",
-      iosBuildNumber: "13000999",
+  // Root policy (CF option 2): fork version codes come from an explicit committed allocation table, not a formula.
+  // The counter reset to 0.13.1-fork.1, which must install over the already-shipped 0.13.0-fork.4 (13004). Any fork
+  // version without an allocation fails closed. The numeric version stays numeric for iOS and the shared config; the
+  // full fork name is the returned Android-only `androidVersionName`.
+  it("0.13.1-fork.1 (counter reset) maps to allocated code 13005, above the installed 0.13.0-fork.4", () => {
+    const reset = getNativeReleaseVersion("0.13.1-fork.1");
+    expect(reset).toEqual({
+      appVersion: "0.13.1",
+      androidVersionCode: 13005,
+      androidVersionName: "0.13.1-fork.1",
+      iosBuildNumber: "13001999",
     });
+    expect(reset.androidVersionCode).toBeGreaterThan(
+      getNativeReleaseVersion("0.13.0-fork.4").androidVersionCode,
+    );
   });
 
-  it("rejects a fork number of 0 and a fork that would leave the patch slot", () => {
-    expect(() => getNativeReleaseVersion("0.13.0-fork.0")).toThrow(/Fork number/);
-    expect(() => getNativeReleaseVersion("0.13.998-fork.2")).toThrow(/Fork number/);
-    expect(getNativeReleaseVersion("0.13.997-fork.2").androidVersionCode).toBe(13999);
+  it("historical 0.13.0 fork releases keep their shipped codes", () => {
+    for (const [fork, code] of [
+      [2, 13002],
+      [3, 13003],
+      [4, 13004],
+    ]) {
+      expect(getNativeReleaseVersion(`0.13.0-fork.${fork}`)).toEqual({
+        appVersion: "0.13.0",
+        androidVersionCode: code,
+        androidVersionName: `0.13.0-fork.${fork}`,
+        iosBuildNumber: "13000999",
+      });
+    }
+  });
+
+  it("rejects fork versions without an explicit allocation instead of deriving a code", () => {
+    // 0.13.0-fork.5 is what the old formula would hand 13005; 0.13.1-fork.2 is the next unallocated reset build.
+    for (const version of ["0.13.0-fork.5", "0.13.1-fork.2", "0.13.2-fork.1", "0.14.0-fork.1"]) {
+      expect(() => getNativeReleaseVersion(version)).toThrow(/allocat/i);
+    }
+  });
+
+  it("still rejects a fork number of 0 and forks past the patch slot", () => {
+    expect(() => getNativeReleaseVersion("0.13.0-fork.0")).toThrow();
+    expect(() => getNativeReleaseVersion("0.13.998-fork.2")).toThrow();
+    // Formerly derived 13999; with explicit allocation an in-range but unallocated fork fails closed too.
+    expect(() => getNativeReleaseVersion("0.13.997-fork.2")).toThrow(/allocat/i);
   });
 
   it("stable and beta mappings are unchanged by fork support", () => {
@@ -75,5 +103,13 @@ describe("fork release versions", () => {
       androidVersionCode: 13000,
       iosBuildNumber: "13000002",
     });
+    expect(getNativeReleaseVersion("0.13.1")).toEqual({
+      appVersion: "0.13.1",
+      androidVersionCode: 13001,
+      iosBuildNumber: "13001999",
+    });
+    expect(
+      getFdroidVersionCodes("0.13.1").map((entry: { versionCode: number }) => entry.versionCode),
+    ).toEqual([130011, 130012, 130013, 130014]);
   });
 });
