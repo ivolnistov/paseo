@@ -8,6 +8,7 @@ const FORK_ANDROID_VERSION_CODES = {
   "0.13.0-fork.3": 13003,
   "0.13.0-fork.4": 13004,
   "0.13.1-fork.1": 13005,
+  "0.13.2-fork.1": 13006,
 };
 const FDROID_ABI_VERSION_CODE_SUFFIXES = {
   "armeabi-v7a": 1,

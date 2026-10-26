@@ -78,9 +78,21 @@ describe("fork release versions", () => {
     }
   });
 
+  it("0.13.2-fork.1 is allocated 13006, above 0.13.1-fork.1", () => {
+    expect(getNativeReleaseVersion("0.13.2-fork.1")).toEqual({
+      appVersion: "0.13.2",
+      androidVersionCode: 13006,
+      androidVersionName: "0.13.2-fork.1",
+      iosBuildNumber: "13002999",
+    });
+    expect(getNativeReleaseVersion("0.13.2-fork.1").androidVersionCode).toBeGreaterThan(
+      getNativeReleaseVersion("0.13.1-fork.1").androidVersionCode,
+    );
+  });
+
   it("rejects fork versions without an explicit allocation instead of deriving a code", () => {
     // 0.13.0-fork.5 is what the old formula would hand 13005; 0.13.1-fork.2 is the next unallocated reset build.
-    for (const version of ["0.13.0-fork.5", "0.13.1-fork.2", "0.13.2-fork.1", "0.14.0-fork.1"]) {
+    for (const version of ["0.13.0-fork.5", "0.13.1-fork.2", "0.13.2-fork.2", "0.14.0-fork.1"]) {
       expect(() => getNativeReleaseVersion(version)).toThrow(/allocat/i);
     }
   });
