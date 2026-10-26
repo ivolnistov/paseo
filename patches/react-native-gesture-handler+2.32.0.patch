@@ -151,6 +151,72 @@ index 8d78aea..b84d19e 100644
    private fun extractGestureHandlers(
      viewGroup: ViewGroup,
      coords: FloatArray,
+diff --git a/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/core/TapGestureHandler.kt b/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/core/TapGestureHandler.kt
+index 0000000..0000000 100644
+--- a/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/core/TapGestureHandler.kt
++++ b/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/core/TapGestureHandler.kt
+@@ -1,6 +1,7 @@
+ package com.swmansion.gesturehandler.core
+ 
+ import android.content.Context
++import android.os.Build
+ import android.os.Handler
+ import android.os.Looper
+ import android.view.MotionEvent
+@@ -28,6 +29,35 @@
+   private var lastY = 0f
+   private var handler: Handler? = null
+   private var tapsSoFar = 0
++
++  // A mouse click on API 23+ can report both DOWN/UP and BUTTON_PRESS/RELEASE, and a touchpad in pointer mode
++  // reports only DOWN/UP. Each click takes its tap boundaries from exactly one pair, so it counts as one tap.
++  private var mouseBoundary = MouseBoundary.NONE
++
++  private enum class MouseBoundary { NONE, TOUCH, BUTTON }
++
++  private fun isConfiguredMouseButton(buttons: Int): Boolean =
++    if (mouseButton == 0) buttons == MotionEvent.BUTTON_PRIMARY else buttons and mouseButton != 0
++
++  /** true or false when this click's boundary rule decides the event; null leaves it to the base mouse filter. */
++  private fun mouseClickBoundary(sourceEvent: MotionEvent): Boolean? {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
++      sourceEvent.getToolType(0) != MotionEvent.TOOL_TYPE_MOUSE
++    ) {
++      return null
++    }
++    return when (sourceEvent.actionMasked) {
++      MotionEvent.ACTION_DOWN -> {
++        mouseBoundary =
++          if (isConfiguredMouseButton(sourceEvent.buttonState)) MouseBoundary.TOUCH else MouseBoundary.BUTTON
++        mouseBoundary == MouseBoundary.TOUCH
++      }
++      MotionEvent.ACTION_UP -> mouseBoundary == MouseBoundary.TOUCH
++      MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE ->
++        if (mouseBoundary == MouseBoundary.TOUCH) false else null
++      else -> null
++    }
++  }
+   private val failDelayed = Runnable { fail() }
+ 
+   init {
+@@ -82,7 +112,8 @@
+   }
+ 
+   override fun onHandle(event: MotionEvent, sourceEvent: MotionEvent) {
+-    if (!shouldActivateWithMouse(sourceEvent)) {
++    val mouseDecision = mouseClickBoundary(sourceEvent)
++    if (mouseDecision == false || (mouseDecision == null && !shouldActivateWithMouse(sourceEvent))) {
+       return
+     }
+ 
+@@ -135,6 +166,7 @@
+ 
+   override fun onReset() {
+     tapsSoFar = 0
++    mouseBoundary = MouseBoundary.NONE
+     currentMaxNumberOfPointers = 0
+     handler?.removeCallbacksAndMessages(null)
+   }
 diff --git a/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/react/RNGestureHandlerRootHelper.kt b/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/react/RNGestureHandlerRootHelper.kt
 index 629c155..dc0790d 100644
 --- a/node_modules/react-native-gesture-handler/android/src/main/java/com/swmansion/gesturehandler/react/RNGestureHandlerRootHelper.kt
