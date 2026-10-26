@@ -77,6 +77,17 @@ Run its native regression tests from `packages/app/android` after prebuild:
   --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
 ```
 
+The `react-native-gesture-handler@2.32.0` patch makes each mouse click on a Tap gesture count once,
+including Android touchpads in pointer mode that send no button events. Its 19 Robolectric cases
+(touchpad, USB mouse, button-only, secondary button, multi-tap, cancel, stray UP, drag, delay and
+finger) live in the patched module. Run only them from `packages/app/android` after prebuild:
+
+```bash
+./gradlew :react-native-gesture-handler:testDebugUnitTest \
+  --tests 'com.swmansion.gesturehandler.core.TapGestureHandlerMouse*' \
+  --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
+```
+
 From repo root:
 
 ```bash
