@@ -1662,9 +1662,9 @@ export async function createPaseoDaemon(
           });
           return;
         }
-        // COMPAT(codexMcpProtocolVersion): added in local v0.12.0 build, remove once the bundled
-        // MCP SDK (1.29.0) advertises every MCP-Protocol-Version Codex sends.
-        // Codex can send its preferred, newer MCP protocol version after
+        // COMPAT(mcpProtocolVersion): added in local v0.12.0 build, remove once the bundled
+        // MCP SDK advertises every MCP-Protocol-Version the client sends.
+        // A client can send its preferred, newer MCP protocol version after
         // initialization rather than the already-negotiated version. The
         // bundled SDK rejects that unadvertised header. Preserve supported
         // versions, but remove unknown values from both representations:
