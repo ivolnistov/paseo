@@ -1,0 +1,78 @@
+name: Fork build
+
+# Read-only checks for the ivolnistov/paseo fork: static checks, server identity tests and a package dry run.
+# No secrets, environments or write permissions; publication lives in fork-release.yml.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    if: github.repository == 'ivolnistov/paseo'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build:server
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+
+  identity-tests:
+    if: github.repository == 'ivolnistov/paseo'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build:server
+      - name: Server identity suites
+        working-directory: packages/server
+        run: >-
+          npx vitest run --bail=1
+          src/server/daemon-version.test.ts
+          src/server/session/daemon/npm-global-cli.test.ts
+      - name: CLI daemon runner suite
+        working-directory: packages/cli
+        run: npx vitest run --bail=1 src/commands/daemon/local-daemon.test.ts
+      - name: Release contracts
+        env:
+          PASEO_FORK_CONTRACTS: "1"
+        run: node --test scripts/daemon-launch-contract.test.mjs scripts/ci-workflow.test.mjs
+
+  package-dry-run:
+    if: github.repository == 'ivolnistov/paseo'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build:server
+      - run: npm run build:daemon-web-ui
+      - name: Pack the owned packages and validate the plan (never publishes)
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          version="0.0.0-ci.${RUN_NUMBER}"
+          node scripts/fork-release.mjs prepare --src . --version "$version" --out "$RUNNER_TEMP/packages"
+          node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
+            --registry https://npm.pkg.github.com --version "$version" --source-sha "$(git rev-parse HEAD)"

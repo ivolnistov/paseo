@@ -181,7 +181,7 @@
               // Listener lifecycle only: unlink the Unix socket before binding or after stopping the proxy.
               "server/service-proxy.ts": ["existsSync", "unlinkSync"],
               // TODO: self-update origin validation exposes synchronous package-root and realpath checks; migrate validation and its runtime interface together.
-              "server/session/daemon/install-origin.ts": ["existsSync", "readFileSync"],
+              "server/server-identity.ts": ["existsSync", "readFileSync"],
               // TODO: npm self-update inspection probes the reported install path; move the probe into bounded async installation inspection.
               "server/session/daemon/npm-global-cli.ts": ["lstatSync"],
               // Speech child process: model-file validation runs in the worker-backed local speech provider.

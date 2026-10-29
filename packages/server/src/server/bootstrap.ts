@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js";
@@ -1660,6 +1661,29 @@ export async function createPaseoDaemon(
             id: null,
           });
           return;
+        }
+        // COMPAT(codexMcpProtocolVersion): added in local v0.12.0 build, remove once the bundled
+        // MCP SDK (1.29.0) advertises every MCP-Protocol-Version Codex sends.
+        // Codex can send its preferred, newer MCP protocol version after
+        // initialization rather than the already-negotiated version. The
+        // bundled SDK rejects that unadvertised header. Preserve supported
+        // versions, but remove unknown values from both representations:
+        // the SDK's Node adapter reads rawHeaders.
+        const requestedProtocolVersion = req.headers["mcp-protocol-version"];
+        if (
+          typeof requestedProtocolVersion === "string" &&
+          !SUPPORTED_PROTOCOL_VERSIONS.includes(requestedProtocolVersion)
+        ) {
+          logger.warn(
+            { requestedProtocolVersion },
+            "Agent MCP client sent an unadvertised MCP-Protocol-Version header; ignoring it (see #3599)",
+          );
+          delete req.headers["mcp-protocol-version"];
+          req.rawHeaders = req.rawHeaders.filter((_, index, headers) =>
+            index % 2 === 0
+              ? headers[index].toLowerCase() !== "mcp-protocol-version"
+              : headers[index - 1].toLowerCase() !== "mcp-protocol-version",
+          );
         }
         const callerAgentIdRaw = req.query.callerAgentId;
         let callerAgentId: string | undefined;

@@ -1,16 +1,19 @@
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { experimental_createMCPClient } from "ai";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import pino from "pino";
 
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { hashDaemonPassword } from "../auth.js";
 import { createPaseoDaemon, type PaseoDaemonConfig } from "../bootstrap.js";
+import { BuiltinPluginLoader } from "../plugins/builtin/index.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import type {
   AgentClient,
@@ -91,8 +94,24 @@ async function createMcpClient(url: string, authToken?: string): Promise<McpClie
 
 interface OfflineMcpDaemon {
   client: McpClient;
+  port: number;
   stop: () => Promise<void>;
 }
+
+const DISABLED_SPEECH_PROVIDER = { provider: "local", explicit: true, enabled: false } as const;
+
+// Keeps every test daemon offline: relay defaults to on and speech to local providers.
+const OFFLINE_DAEMON_CONFIG = {
+  relayEnabled: false,
+  speech: {
+    providers: {
+      dictationStt: DISABLED_SPEECH_PROVIDER,
+      voiceTurnDetection: DISABLED_SPEECH_PROVIDER,
+      voiceStt: DISABLED_SPEECH_PROVIDER,
+      voiceTts: DISABLED_SPEECH_PROVIDER,
+    },
+  },
+} satisfies Partial<PaseoDaemonConfig>;
 
 async function startOfflineMcpDaemon(): Promise<OfflineMcpDaemon> {
   const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-"));
@@ -113,8 +132,10 @@ async function startOfflineMcpDaemon(): Promise<OfflineMcpDaemon> {
       mcpDebug: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     },
     pino({ level: "silent" }),
+    { builtinPlugins: new BuiltinPluginLoader(undefined, []) },
   ).catch(async (error: unknown) => {
     await removeDirectories();
     throw error;
@@ -124,6 +145,7 @@ async function startOfflineMcpDaemon(): Promise<OfflineMcpDaemon> {
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
     return {
       client,
+      port,
       stop: async () => {
         await client.close();
         await daemon.stop();
@@ -135,6 +157,179 @@ async function startOfflineMcpDaemon(): Promise<OfflineMcpDaemon> {
     await removeDirectories();
     throw error;
   }
+}
+
+interface ProtocolHeaderCase {
+  label: string;
+  header: { name: string; value: string } | null;
+}
+
+const MCP_ACCEPT = "application/json, text/event-stream";
+
+// Header names are matched case-insensitively, so cover the casings clients send.
+// Unadvertised values include a past date, future dates and a non-date value.
+const SUPPORTED_PROTOCOL_HEADER_CASES: ProtocolHeaderCase[] = [
+  { label: "absent", header: null },
+  {
+    label: "latest, lower-case name",
+    header: { name: "mcp-protocol-version", value: LATEST_PROTOCOL_VERSION },
+  },
+  {
+    label: "2025-06-18, mixed-case name",
+    header: { name: "Mcp-Protocol-Version", value: "2025-06-18" },
+  },
+  {
+    label: "2024-11-05, upper-case name",
+    header: { name: "MCP-PROTOCOL-VERSION", value: "2024-11-05" },
+  },
+];
+
+const UNSUPPORTED_PROTOCOL_HEADER_CASES: ProtocolHeaderCase[] = [
+  {
+    label: "unadvertised past, lower-case name",
+    header: { name: "mcp-protocol-version", value: "2024-01-01" },
+  },
+  {
+    label: "future, mixed-case name",
+    header: { name: "Mcp-Protocol-Version", value: "2099-01-01" },
+  },
+  {
+    label: "future, upper-case name",
+    header: { name: "MCP-PROTOCOL-VERSION", value: "2026-07-28" },
+  },
+  {
+    label: "non-date mixed-case value",
+    header: { name: "mCp-PrOtOcOl-VeRsIoN", value: "Draft-2026-RC1" },
+  },
+];
+
+interface RawMcpResponse {
+  status: number;
+  contentType: string;
+  body: string;
+}
+
+interface JsonRpcReply {
+  id?: unknown;
+  result?: Record<string, unknown>;
+  error?: { code?: unknown; message?: unknown };
+}
+
+// Sends a JSON-RPC POST with an exact raw header list so the daemon sees the given
+// header-name casing and order in req.rawHeaders, which the SDK's Node adapter reads.
+// The protocol header sits between Content-Type and Accept: a filter that drops the
+// wrong array slot would corrupt one of them and fail with 406 or 415.
+async function postRawMcp(options: {
+  port: number;
+  message: Record<string, unknown>;
+  protocolHeader: ProtocolHeaderCase["header"];
+  accept?: string;
+}): Promise<RawMcpResponse> {
+  const body = JSON.stringify(options.message);
+  const rawHeaders = [
+    "Host",
+    `127.0.0.1:${options.port}`,
+    "Content-Type",
+    "application/json",
+    ...(options.protocolHeader ? [options.protocolHeader.name, options.protocolHeader.value] : []),
+    "Accept",
+    options.accept ?? MCP_ACCEPT,
+    "Content-Length",
+    String(Buffer.byteLength(body)),
+    "Connection",
+    "close",
+  ];
+  const response = new Promise<RawMcpResponse>((resolve, reject) => {
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port: options.port,
+        path: "/mcp/agents",
+        method: "POST",
+        headers: rawHeaders,
+        agent: false,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("error", reject);
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            contentType: String(res.headers["content-type"] ?? ""),
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end(body);
+  });
+  return withTimeout({ promise: response, timeoutMs: 10_000, label: "raw agent MCP POST" });
+}
+
+function parseJsonRpcReply(response: RawMcpResponse, id: number): JsonRpcReply {
+  const payloads = response.contentType.includes("text/event-stream")
+    ? response.body
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trim())
+        .filter((data) => data.length > 0)
+    : [response.body];
+  for (const payload of payloads) {
+    const parsed: JsonRpcReply = JSON.parse(payload);
+    if (parsed.id === id) {
+      return parsed;
+    }
+  }
+  throw new Error(
+    `No JSON-RPC reply with id ${id} in ${response.status} response: ${response.body}`,
+  );
+}
+
+function initializeMessage(id: number): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method: "initialize",
+    params: {
+      protocolVersion: LATEST_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "agent-mcp-protocol-header-e2e", version: "0.0.0" },
+    },
+  };
+}
+
+function toolsListMessage(id: number): Record<string, unknown> {
+  return { jsonrpc: "2.0", id, method: "tools/list", params: {} };
+}
+
+async function expectInitializeSucceeds(
+  port: number,
+  protocolHeader: ProtocolHeaderCase["header"],
+): Promise<void> {
+  const response = await postRawMcp({ port, message: initializeMessage(1), protocolHeader });
+  expect({ status: response.status, body: response.body }).toMatchObject({ status: 200 });
+  const reply = parseJsonRpcReply(response, 1);
+  expect(reply.error).toBeUndefined();
+  expect(reply.result).toMatchObject({
+    protocolVersion: LATEST_PROTOCOL_VERSION,
+    serverInfo: expect.any(Object),
+  });
+}
+
+async function expectToolsListSucceeds(
+  port: number,
+  protocolHeader: ProtocolHeaderCase["header"],
+): Promise<void> {
+  const response = await postRawMcp({ port, message: toolsListMessage(2), protocolHeader });
+  expect({ status: response.status, body: response.body }).toMatchObject({ status: 200 });
+  const reply = parseJsonRpcReply(response, 2);
+  expect(reply.error).toBeUndefined();
+  const tools = reply.result?.tools;
+  expect(Array.isArray(tools)).toBe(true);
+  const toolNames = (tools as Array<{ name?: unknown }>).map((tool) => tool.name);
+  expect(toolNames).toEqual(expect.arrayContaining(["create_agent", "list_workspaces"]));
 }
 
 type WorkspaceCreation = { workspaceId: unknown } | { error: unknown };
@@ -247,9 +442,12 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -337,10 +535,13 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
       auth: { password: hashDaemonPassword("daemon-secret") },
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const mcpUrl = `http://127.0.0.1:${port}/mcp/agents`;
@@ -407,9 +608,12 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createMcpRecordingAgentClients(recorder),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -430,8 +634,13 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createMcpRecordingAgentClients(disabledRecorder),
       agentStoragePath: path.join(disabledPaseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
-    const disabledDaemon = await createPaseoDaemon(disabledDaemonConfig, pino({ level: "silent" }));
+    const disabledDaemon = await createPaseoDaemon(
+      disabledDaemonConfig,
+      pino({ level: "silent" }),
+      { builtinPlugins: new BuiltinPluginLoader(undefined, []) },
+    );
     await disabledDaemon.start();
 
     const disabledClient = await createMcpClient(`http://127.0.0.1:${disabledPort}/mcp/agents`);
@@ -517,9 +726,12 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createMcpRecordingAgentClients(recorder),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -576,9 +788,12 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -756,9 +971,12 @@ describe("agent MCP end-to-end (offline)", () => {
         codex: new StartTurnFailureClient(),
       },
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -803,9 +1021,12 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpDebug: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
+      ...OFFLINE_DAEMON_CONFIG,
     };
 
-    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }));
+    const daemon = await createPaseoDaemon(daemonConfig, pino({ level: "silent" }), {
+      builtinPlugins: new BuiltinPluginLoader(undefined, []),
+    });
     await daemon.start();
 
     const client = await createMcpClient(`http://127.0.0.1:${port}/mcp/agents`);
@@ -898,4 +1119,63 @@ describe("agent MCP end-to-end (offline)", () => {
       await rm(repoRoot, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+// Codex can send a newer MCP-Protocol-Version than the bundled SDK advertises. The
+// agent MCP route drops unadvertised values before the SDK sees them; without that,
+// every post-initialize request fails with 400 "Unsupported protocol version".
+describe("agent MCP protocol version header (offline)", () => {
+  let daemon: OfflineMcpDaemon | undefined;
+
+  function daemonPort(): number {
+    if (!daemon) throw new Error("Offline MCP daemon did not start");
+    return daemon.port;
+  }
+
+  beforeAll(async () => {
+    daemon = await startOfflineMcpDaemon();
+  });
+
+  afterAll(async () => {
+    await daemon?.stop();
+  });
+
+  test.each(SUPPORTED_PROTOCOL_HEADER_CASES)(
+    "initialize succeeds with header $label",
+    async ({ header }) => {
+      await expectInitializeSucceeds(daemonPort(), header);
+    },
+  );
+
+  test.each(SUPPORTED_PROTOCOL_HEADER_CASES)(
+    "tools/list succeeds with header $label",
+    async ({ header }) => {
+      await expectToolsListSucceeds(daemonPort(), header);
+    },
+  );
+
+  test.each(UNSUPPORTED_PROTOCOL_HEADER_CASES)(
+    "initialize succeeds with header $label",
+    async ({ header }) => {
+      await expectInitializeSucceeds(daemonPort(), header);
+    },
+  );
+
+  test.each(UNSUPPORTED_PROTOCOL_HEADER_CASES)(
+    "tools/list succeeds with header $label",
+    async ({ header }) => {
+      await expectToolsListSucceeds(daemonPort(), header);
+    },
+  );
+
+  test("dropping an unadvertised header leaves the neighbouring Accept header in force", async () => {
+    const response = await postRawMcp({
+      port: daemonPort(),
+      message: toolsListMessage(3),
+      protocolHeader: { name: "Mcp-Protocol-Version", value: "2099-01-01" },
+      accept: "application/json",
+    });
+    expect(response.status).toBe(406);
+    expect(response.body).toContain("Not Acceptable");
+  });
 });

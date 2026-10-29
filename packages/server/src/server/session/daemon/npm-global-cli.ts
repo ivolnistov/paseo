@@ -1,9 +1,34 @@
 import { lstatSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import { z } from "zod";
 import { execCommand } from "../../../utils/spawn.js";
+import {
+  findServerPackageFrom,
+  ORIGINAL_SERVER_PACKAGE,
+  OWNED_SERVER_PACKAGE,
+} from "../../server-identity.js";
 
 export const PASEO_CLI_PACKAGE = "@getpaseo/cli";
+
+// The CLI package (and registry) a server identity updates through. The owned fork always uses its own CLI from the
+// approved registry; it never falls back to the official package.
+export interface PaseoCliTarget {
+  packageName: string;
+  registry: string | null;
+}
+
+const ORIGINAL_CLI_TARGET: PaseoCliTarget = { packageName: PASEO_CLI_PACKAGE, registry: null };
+const OWNED_CLI_TARGET: PaseoCliTarget = {
+  packageName: "@ivolnistov/paseo",
+  registry: "https://npm.pkg.github.com",
+};
+
+export function resolvePaseoCliTarget(serverPackageName: string): PaseoCliTarget {
+  if (serverPackageName === ORIGINAL_SERVER_PACKAGE) return ORIGINAL_CLI_TARGET;
+  if (serverPackageName === OWNED_SERVER_PACKAGE) return OWNED_CLI_TARGET;
+  throw new Error(`No Paseo CLI update target for server package ${serverPackageName}`);
+}
 
 const NPM_PROBE_TIMEOUT_MS = 10_000;
 const NPM_INSTALL_TIMEOUT_MS = 300_000;
@@ -89,7 +114,10 @@ async function runExternalCommand(
   }
 }
 
-function parseNpmGlobalPaseoInstall(stdout: string): NpmGlobalPaseoInstall | null {
+function parseNpmGlobalPaseoInstall(
+  stdout: string,
+  cliPackage: string,
+): NpmGlobalPaseoInstall | null {
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(stdout);
@@ -102,30 +130,33 @@ function parseNpmGlobalPaseoInstall(stdout: string): NpmGlobalPaseoInstall | nul
     return null;
   }
 
-  const rawCliPackage = list.data.dependencies?.[PASEO_CLI_PACKAGE];
-  const cliPackage = NpmGlobalCliPackageSchema.safeParse(rawCliPackage);
-  if (!cliPackage.success) {
+  const rawCliPackage = list.data.dependencies?.[cliPackage];
+  const parsedCli = NpmGlobalCliPackageSchema.safeParse(rawCliPackage);
+  if (!parsedCli.success) {
     return null;
   }
 
   return {
-    version: cliPackage.data.version,
-    packagePath: cliPackage.data.path,
+    version: parsedCli.data.version,
+    packagePath: parsedCli.data.path,
     globalRootPath: list.data.path ?? null,
     // npm links an install by making its node_modules entry a symlink (a junction
     // on Windows), and `npm ls --json` reports no flag for it.
-    isLinked: lstatSync(cliPackage.data.path).isSymbolicLink(),
+    isLinked: lstatSync(parsedCli.data.path).isSymbolicLink(),
   };
 }
 
 export class DefaultNpmGlobalPaseoCli implements NpmGlobalPaseoCli {
-  constructor(private readonly runCommand: CommandRunner = runExternalCommand) {}
+  constructor(
+    private readonly runCommand: CommandRunner = runExternalCommand,
+    readonly target: PaseoCliTarget = ORIGINAL_CLI_TARGET,
+  ) {}
 
   async inspect(options: NpmGlobalOptions = {}): Promise<NpmGlobalPaseoInstall> {
     const prefixArgs = options.prefix ? ["--prefix", options.prefix] : [];
     const result = await this.runCommand(
       "npm",
-      ["-g", "ls", PASEO_CLI_PACKAGE, "--json", "--depth=0", "--long", ...prefixArgs],
+      ["-g", "ls", this.target.packageName, "--json", "--depth=0", "--long", ...prefixArgs],
       {
         timeout: NPM_PROBE_TIMEOUT_MS,
         maxBuffer: NPM_MAX_BUFFER_BYTES,
@@ -136,20 +167,56 @@ export class DefaultNpmGlobalPaseoCli implements NpmGlobalPaseoCli {
       throw new Error(result.stderr.trim() || "npm is not available on this host");
     }
 
-    const install = parseNpmGlobalPaseoInstall(result.stdout);
+    const install = parseNpmGlobalPaseoInstall(result.stdout, this.target.packageName);
     if (!install) {
-      throw new Error(`${PASEO_CLI_PACKAGE} is not installed with npm -g on this host`);
+      throw new Error(`${this.target.packageName} is not installed with npm -g on this host`);
     }
     return install;
   }
 
   installLatest(options: NpmGlobalOptions = {}): Promise<CommandResult> {
     const prefixArgs = options.prefix ? ["--prefix", options.prefix] : [];
-    return this.runCommand("npm", ["install", "-g", `${PASEO_CLI_PACKAGE}@latest`, ...prefixArgs], {
-      timeout: NPM_INSTALL_TIMEOUT_MS,
-      maxBuffer: NPM_MAX_BUFFER_BYTES,
-    });
+    const { packageName, registry } = this.target;
+    // A scoped registry flag pins only this package's scope to the approved registry.
+    const registryArgs = registry ? [`--${packageName.split("/")[0]}:registry=${registry}`] : [];
+    return this.runCommand(
+      "npm",
+      ["install", "-g", `${packageName}@latest`, ...registryArgs, ...prefixArgs],
+      {
+        timeout: NPM_INSTALL_TIMEOUT_MS,
+        maxBuffer: NPM_MAX_BUFFER_BYTES,
+      },
+    );
   }
 }
 
-export const npmGlobalPaseoCli = new DefaultNpmGlobalPaseoCli();
+// The target follows the identity of the server package this daemon runs from, read when it is used. A daemon whose
+// identity cannot be read refuses to inspect or update rather than guessing a package.
+export function resolveRunningPaseoCliTarget(moduleUrl: string = import.meta.url): PaseoCliTarget {
+  const serverPackage = findServerPackageFrom(fileURLToPath(moduleUrl));
+  if (!serverPackage) {
+    throw new Error("Cannot determine this daemon's server package; self-update is unavailable");
+  }
+  return resolvePaseoCliTarget(serverPackage.name);
+}
+
+class RunningServerNpmGlobalPaseoCli implements NpmGlobalPaseoCli {
+  private delegate(): DefaultNpmGlobalPaseoCli {
+    return new DefaultNpmGlobalPaseoCli(runExternalCommand, resolveRunningPaseoCliTarget());
+  }
+
+  get target(): PaseoCliTarget {
+    return resolveRunningPaseoCliTarget();
+  }
+
+  inspect(options?: NpmGlobalOptions): Promise<NpmGlobalPaseoInstall> {
+    return this.delegate().inspect(options);
+  }
+
+  installLatest(options?: NpmGlobalOptions): Promise<CommandResult> {
+    return this.delegate().installLatest(options);
+  }
+}
+
+export const npmGlobalPaseoCli: NpmGlobalPaseoCli & { readonly target: PaseoCliTarget } =
+  new RunningServerNpmGlobalPaseoCli();

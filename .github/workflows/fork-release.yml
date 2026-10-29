@@ -1,0 +1,317 @@
+name: Fork release
+
+# Manual release of the ivolnistov/paseo fork from one explicit tag, commit and package version. Every job checks
+# out the dispatched SHA, and packing and publication run only after the checks of that SHA in this same run.
+# Only the protected jobs hold credentials: release-apk (signing), publish-packages (GitHub Packages) and
+# publish-release (draft GitHub release). Never runs the root `release:publish` script.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, already pushed (for example v0.13.0-fork.1)
+        required: true
+        type: string
+      sha:
+        description: Full commit SHA the tag must point at
+        required: true
+        type: string
+      version:
+        description: Exact version for the seven owned npm packages (for example 0.13.0-fork.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'ivolnistov/paseo'
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.check.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+      - id: check
+        name: Tag, commit and version agree, and the commit is on main
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full commit SHA"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "version must be exact"; exit 1; }
+          [[ "$TAG" =~ ^[0-9A-Za-z._/-]+$ ]] || { echo "unexpected tag characters"; exit 1; }
+          git fetch --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}" "+refs/heads/main:refs/remotes/origin/main"
+          tagged=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
+          [ "$tagged" = "$SHA" ] || { echo "tag $TAG is $tagged, not $SHA"; exit 1; }
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "$SHA is not on main"; exit 1; }
+          app_version=$(node -e 'console.log(require("./packages/app/package.json").version)')
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "source app version $app_version; fork package version $VERSION"
+
+  checks:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build:server
+      - run: npm run lint
+      - run: npm run typecheck
+      - name: Release contracts
+        env:
+          PASEO_FORK_CONTRACTS: "1"
+        run: node --test scripts/daemon-launch-contract.test.mjs scripts/ci-workflow.test.mjs
+      - name: Server identity suites
+        working-directory: packages/server
+        run: >-
+          npx vitest run --bail=1
+          src/server/daemon-version.test.ts
+          src/server/session/daemon/npm-global-cli.test.ts
+      - name: CLI daemon runner suite
+        working-directory: packages/cli
+        run: npx vitest run --bail=1 src/commands/daemon/local-daemon.test.ts
+
+  pack:
+    needs: [validate, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build:server
+      - run: npm run build:daemon-web-ui
+      - name: Pack the seven owned packages
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          node scripts/fork-release.mjs prepare --src . --version "$VERSION" --out "$RUNNER_TEMP/packages"
+          node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
+            --registry https://npm.pkg.github.com --version "$VERSION" --source-sha "$SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-packages
+          path: ${{ runner.temp }}/packages
+          if-no-files-found: error
+
+  release-apk:
+    needs: [validate, checks]
+    runs-on: ubuntu-latest
+    environment: fork-release-apk
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # The single dependency install: deps-state.sh writes a substantiated deps.ok that build-apk.sh then reuses
+      # from the same state dir instead of installing again.
+      - name: Install dependencies once
+        run: bash scripts/mobile-build/deps-state.sh install --src . --state-dir "$RUNNER_TEMP/apk-state"
+      - name: The installed React Native catalog pins SDK 36, build-tools 36.0.0 and NDK 27.1.12297006
+        run: |
+          set -euo pipefail
+          catalog=node_modules/react-native/gradle/libs.versions.toml
+          grep -qx 'compileSdk = "36"' "$catalog"
+          grep -qx 'buildTools = "36.0.0"' "$catalog"
+          grep -qx 'ndkVersion = "27.1.12297006"' "$catalog"
+      - name: Install the pinned Android SDK packages
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+      # Secret-free: only Gradle's dependency and wrapper caches; no keystore, npmrc, google-services or app output.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-arm64-v8a-jdk17-${{ hashFiles('package-lock.json') }}
+      - run: npm run build:app-deps
+      - name: Write signing and Firebase inputs (mode 0600, runner temp only)
+        env:
+          KEYSTORE_B64: ${{ secrets.FORK_RELEASE_KEYSTORE_B64 }}
+          STOREPASS: ${{ secrets.FORK_RELEASE_STOREPASS }}
+          GOOGLE_SERVICES: ${{ secrets.FORK_GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing/release.p12"
+          printf '%s' "$STOREPASS" > "$RUNNER_TEMP/signing/storepass"
+          printf '%s' "$GOOGLE_SERVICES" > "$RUNNER_TEMP/signing/google-services.json"
+      - name: Build, sign and verify with the reviewed helper
+        env:
+          SHA: ${{ inputs.sha }}
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+        run: |
+          bash scripts/build-apk.sh --src . --expected-sha "$SHA" --version "$APP_VERSION" \
+            --variant production --abi arm64-v8a \
+            --google-services "$RUNNER_TEMP/signing/google-services.json" \
+            --keystore "$RUNNER_TEMP/signing" \
+            --expected-cert 0226bc7d8f756b50c0bfddd40a3e942086b38a7354fd2ba5fdda713c7aca5ec0 \
+            --java-home "$JAVA_HOME" --android-home "$ANDROID_HOME" \
+            --state-dir "$RUNNER_TEMP/apk-state" --out "$RUNNER_TEMP/apk" --with-jvm-tests
+      - name: Remove signing inputs
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/signing"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-apk
+          path: |
+            ${{ runner.temp }}/apk/*.apk
+            ${{ runner.temp }}/apk/*.apk.sha256
+            ${{ runner.temp }}/apk/*.apk.build-manifest.json
+          if-no-files-found: error
+
+  publish-packages:
+    needs: [validate, checks, pack]
+    runs-on: ubuntu-latest
+    environment: fork-release-packages
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-packages
+          path: ${{ runner.temp }}/packages
+      - name: Validate the exact artifacts against the strict registry and the dispatch inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
+            --registry https://npm.pkg.github.com --version "$VERSION" --source-sha "$SHA"
+      - name: Read what the owned registry already has for this version
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "@ivolnistov:registry=https://npm.pkg.github.com" \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$RUNNER_TEMP/npmrc"
+          # Only the seven owned names at the validated version are queried; the artifacts choose nothing.
+          # A 404 means "not published"; any other error, or an existing version without an integrity, stops.
+          node -e '
+            const { execFileSync } = require("child_process");
+            const [userconfig, out, version] = process.argv.slice(1);
+            const names = ["@ivolnistov/paseo-protocol", "@ivolnistov/paseo-highlight", "@ivolnistov/paseo-relay",
+              "@ivolnistov/paseo-client", "@ivolnistov/paseo-plugin", "@ivolnistov/paseo-server", "@ivolnistov/paseo"];
+            const existing = {};
+            for (const name of names) {
+              const spec = `${name}@${version}`;
+              let integrity;
+              try {
+                integrity = execFileSync("npm", ["view", spec, "dist.integrity", "--userconfig", userconfig,
+                  "--registry", "https://npm.pkg.github.com"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+              } catch (error) {
+                if (/E404|404 Not Found/.test(String(error.stderr))) continue;
+                console.error(String(error.stderr)); process.exit(1);
+              }
+              if (!/^sha512-/.test(integrity)) { console.error(`${spec}: no sha512 integrity reported`); process.exit(1); }
+              existing[spec] = integrity;
+            }
+            require("fs").writeFileSync(out, JSON.stringify(existing, null, 2));
+          ' "$RUNNER_TEMP/npmrc" "$RUNNER_TEMP/existing.json" "$VERSION"
+      - name: Plan against the registry inventory (identical versions are skipped)
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          node scripts/fork-release.mjs plan-publish --manifest "$RUNNER_TEMP/packages/manifest.json" \
+            --registry https://npm.pkg.github.com --version "$VERSION" --source-sha "$SHA" \
+            --existing "$RUNNER_TEMP/existing.json"
+      - name: Publish the validated, not yet published packages, components first and the CLI last
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const m = require(process.argv[1]);
+            const existing = require(process.argv[2]);
+            const order = ["@ivolnistov/paseo-protocol", "@ivolnistov/paseo-highlight", "@ivolnistov/paseo-relay",
+              "@ivolnistov/paseo-client", "@ivolnistov/paseo-plugin", "@ivolnistov/paseo-server", "@ivolnistov/paseo"];
+            for (const name of order) {
+              const p = m.packages.find((e) => e.name === name);
+              if (!(`${p.name}@${p.version}` in existing)) console.log(p.tarball);
+            }
+          ' "$RUNNER_TEMP/packages/manifest.json" "$RUNNER_TEMP/existing.json" | while read -r tarball; do
+            npm publish "$RUNNER_TEMP/packages/$tarball" --userconfig "$RUNNER_TEMP/npmrc" \
+              --registry https://npm.pkg.github.com --tag latest --ignore-scripts
+          done
+          rm -f "$RUNNER_TEMP/npmrc"
+
+  publish-release:
+    needs: [validate, release-apk, publish-packages]
+    runs-on: ubuntu-latest
+    environment: fork-release-github
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-apk
+          path: ${{ runner.temp }}/apk
+      - name: Check the APK against its checksum and manifest
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/apk"
+          sha256sum -c ./*.apk.sha256
+          node -e '
+            const fs = require("fs"), crypto = require("crypto");
+            const file = fs.readdirSync(".").find((f) => f.endsWith(".apk.build-manifest.json"));
+            const m = JSON.parse(fs.readFileSync(file, "utf8"));
+            const apk = fs.readFileSync(m.artifact.file);
+            if (crypto.createHash("sha256").update(apk).digest("hex") !== m.artifact.sha256) process.exit(1);
+            if (m.source.sha !== process.argv[1]) { console.error("APK manifest source differs from input sha"); process.exit(1); }
+          ' "$SHA"
+      - name: Create a draft release (never overwrites an existing one)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then echo "release $TAG already exists"; exit 1; fi
+          # A draft: the release text is approved by the owner before publication.
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+            --notes "Fork build of ${SHA} (packages ${VERSION}). Draft; notes pending owner approval." \
+            "$RUNNER_TEMP"/apk/*

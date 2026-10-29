@@ -23,7 +23,7 @@ The base version code comes from the package version:
 major * 1_000_000 + minor * 1_000 + patch
 ```
 
-Prerelease metadata is ignored, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. The same value is used as the iOS `buildNumber` because `packages/app/eas.json` uses EAS's local app version source. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
+Stable and beta versions use that base as the Android version code, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. Owned fork builds (`X.Y.Z-fork.N`) are Android only: their version code comes from an explicit allocation table in that helper, one entry per released fork version, and their Android versionName is the full fork version. A fork version without an entry is refused. The iOS `buildNumber` is `base * 1000 + slot`, where the slot is `999` for stable and the beta number for betas; the shared Expo `version` stays the numeric base. Both are set from the helper above because `packages/app/eas.json` uses EAS's local app version source. Each new entry needs a code above every shipped fork code so the APK installs as an update; the fork counter `N` may restart on a new upstream base (`0.13.1-fork.1` is `13005`, after `0.13.0-fork.4` at `13004`). A fork code can equal an upstream code (`0.13.0-fork.3` and upstream `0.13.3` are both `13003`); the fork ships on its own certificate and channel. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
 
 The formula reserves three digits each for minor and patch. If either reaches `1000`, change the formula before cutting that release.
 
@@ -74,6 +74,17 @@ Run its native regression tests from `packages/app/android` after prebuild:
 ```bash
 ./gradlew :expo-modules-core:testDebugUnitTest \
   --tests expo.modules.kotlin.activityresult.AppContextActivityResultRegistryRecreationTest \
+  --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
+```
+
+The `react-native-gesture-handler@2.32.0` patch makes each mouse click on a Tap gesture count once,
+including Android touchpads in pointer mode that send no button events. Its 19 Robolectric cases
+(touchpad, USB mouse, button-only, secondary button, multi-tap, cancel, stray UP, drag, delay and
+finger) live in the patched module. Run only them from `packages/app/android` after prebuild:
+
+```bash
+./gradlew :react-native-gesture-handler:testDebugUnitTest \
+  --tests 'com.swmansion.gesturehandler.core.TapGestureHandlerMouse*' \
   --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
 ```
 
