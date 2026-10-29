@@ -134,7 +134,6 @@ describe("hello admission", () => {
         credential: { kind: "localCredential", token: "stale" },
         passwordHash: undefined,
         localCredential: "current",
-        transport: "direct",
       }),
     ).toMatchObject({ admission: { principalId: "owner" } });
   });
@@ -146,7 +145,6 @@ describe("hello admission", () => {
       const input = {
         passwordHash: CORRECT_PASSWORD_HASH,
         localCredential: second,
-        transport: "direct" as const,
       };
       expect(
         await resolveSessionAdmission({
@@ -179,64 +177,6 @@ describe("hello admission", () => {
       await deleteLocalCredential(home);
       await rm(home, { recursive: true, force: true });
     }
-  });
-
-  // `transport` is the real admission argument restored from before upstream #7668 ("relay" | "direct").
-  const admit = (input: Parameters<typeof resolveSessionAdmission>[0]) =>
-    resolveSessionAdmission(input);
-
-  test("a protected relay hello without a credential is admitted as owner when a password is configured", async () => {
-    expect(
-      await admit({
-        transport: "relay",
-        credential: undefined,
-        passwordHash: CORRECT_PASSWORD_HASH,
-        localCredential: "current",
-      }),
-    ).toMatchObject({ admission: { principalId: "owner" } });
-  });
-
-  test("relay compatibility does not widen direct admission or skip credential checks", async () => {
-    const input = { passwordHash: CORRECT_PASSWORD_HASH, localCredential: "current" };
-    expect(await admit({ ...input, transport: "direct", credential: undefined })).toEqual({
-      rejection: "password_required",
-    });
-    expect(
-      await admit({
-        ...input,
-        transport: "relay",
-        credential: { kind: "password", password: "wrong" },
-      }),
-    ).toEqual({ rejection: "incorrect_password" });
-    expect(
-      await admit({
-        ...input,
-        transport: "relay",
-        credential: { kind: "localCredential", token: "stale" },
-      }),
-    ).toEqual({ rejection: "incorrect_password" });
-    expect(
-      await admit({
-        ...input,
-        transport: "relay",
-        credential: { kind: "password", password: "correct-password" },
-      }),
-    ).toMatchObject({ admission: { principalId: "owner" } });
-    expect(
-      await admit({
-        ...input,
-        transport: "relay",
-        credential: { kind: "localCredential", token: "current" },
-      }),
-    ).toMatchObject({ admission: { principalId: "owner" } });
-    expect(
-      await admit({
-        transport: "relay",
-        credential: undefined,
-        passwordHash: undefined,
-        localCredential: "current",
-      }),
-    ).toMatchObject({ admission: { principalId: "owner" } });
   });
 
   test("writes a private rotating credential and reads it only for the matching target", async () => {

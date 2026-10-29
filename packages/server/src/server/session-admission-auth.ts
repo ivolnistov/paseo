@@ -12,18 +12,12 @@ export async function resolveSessionAdmission(input: {
   credential: WSHelloMessage["auth"];
   passwordHash: string | undefined;
   localCredential: string | null;
-  transport: "direct" | "relay";
 }): Promise<AdmissionResolution> {
-  const { credential, passwordHash, localCredential, transport } = input;
+  const { credential, passwordHash, localCredential } = input;
   if (!passwordHash) {
     return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
   }
   if (!credential) {
-    // COMPAT(relayPasswordOptional): added in 0.13.0-fork.3, an owner-fork restoration of the branch upstream #7668
-    // removed; a relay hello with no credential is the owner. Remove when the owner ends this compatibility exception.
-    if (transport === "relay") {
-      return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
-    }
     return { rejection: "password_required" };
   }
   if (credential.kind === "localCredential") {

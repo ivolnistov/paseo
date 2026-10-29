@@ -44,38 +44,6 @@ interface TimelineFetch {
   fail(message: string): void;
 }
 
-test("visible catch-up signal covers preparation and reconnect but excludes hidden chats", async () => {
-  const world = new TimelineWorld();
-  expect(world.sync.isVisibleCatchUpPending()).toBe(false);
-  world.openedEarlier(["hidden"]);
-  expect(world.sync.isVisibleCatchUpPending()).toBe(false);
-  world.show("pane", ["visible"]);
-  expect(world.sync.isVisibleCatchUpPending()).toBe(true);
-  world.sync.setConnected(true);
-  (await world.nextMembership()).succeed();
-  const visible = await world.nextFetch("visible");
-  expect(world.sync.isVisibleCatchUpPending()).toBe(true);
-  visible.respond({ hasNewer: false });
-  await world.nextFetch("hidden");
-  expect(world.sync.isVisibleCatchUpPending()).toBe(false);
-  world.sync.setConnected(false);
-  world.sync.setConnected(true);
-  expect(world.sync.isVisibleCatchUpPending()).toBe(true);
-  world.show("pane", []);
-  expect(world.sync.isVisibleCatchUpPending()).toBe(false);
-  world.sync.dispose();
-});
-
-test("hiding a pending chat notifies catch-up signal listeners even when demand stays open", () => {
-  const world = new TimelineWorld();
-  world.show("pane", ["visible"]);
-  const signals: boolean[] = [];
-  world.sync.subscribe(() => signals.push(world.sync.isVisibleCatchUpPending()));
-  world.show("pane", []);
-  expect(signals).toEqual([false]);
-  world.sync.dispose();
-});
-
 test("split panes catch up together before hidden open chats start fetching", async () => {
   const world = new TimelineWorld();
   world.openedEarlier(["a-hidden"]);
@@ -221,6 +189,7 @@ class TimelineWorld {
           direction: "tail",
           limit: 40,
           projection: "projected",
+          wholeTurns: true,
         });
       } finally {
         this.forcedTimelineTailReplacements.delete(agentId);
@@ -373,7 +342,12 @@ test("uses a tail fetch when an agent becomes visible", async () => {
   membership.succeed();
 
   const fetch = await world.nextFetch("agent-a");
-  expect(fetch.request).toEqual({ direction: "tail", limit: 40, projection: "projected" });
+  expect(fetch.request).toEqual({
+    direction: "tail",
+    limit: 40,
+    projection: "projected",
+    wholeTurns: true,
+  });
   fetch.respond({ hasNewer: false });
 });
 
@@ -398,6 +372,7 @@ test("loads the cache before choosing the authoritative network request", async 
     cursor: { epoch: "cached-epoch", seq: 17 },
     limit: 40,
     projection: "projected",
+    wholeTurns: true,
   });
   fetch.respond({ hasNewer: false });
 });
@@ -416,6 +391,7 @@ test("catches up after the restored cursor when an agent becomes visible", async
     cursor: { epoch: "epoch-agent-a", seq: 42 },
     limit: 40,
     projection: "projected",
+    wholeTurns: true,
   });
   fetch.respond({ hasNewer: false });
 });
@@ -433,7 +409,12 @@ test("falls back to the latest tail when a restored cursor has more than one cat
   probe.respond({ hasNewer: true, seq: 82 });
 
   const fallback = await world.nextFetch("agent-a");
-  expect(fallback.request).toEqual({ direction: "tail", limit: 40, projection: "projected" });
+  expect(fallback.request).toEqual({
+    direction: "tail",
+    limit: 40,
+    projection: "projected",
+    wholeTurns: true,
+  });
   expect(
     world.applyTimelineResponse({
       requestId: "fallback-tail",
@@ -476,6 +457,7 @@ test("a gap absorbed by a running tail is recovered after the tail completes", a
     cursor: { epoch: "epoch-agent-a", seq: 9 },
     limit: 40,
     projection: "projected",
+    wholeTurns: true,
   });
   recovery.respond({ hasNewer: false });
   await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
@@ -559,6 +541,7 @@ test("unchanged visible-set publication does not cancel paged catch-up", async (
     cursor: { epoch: "epoch-agent-a", seq: 5 },
     limit: 40,
     projection: "projected",
+    wholeTurns: true,
   });
   world.expectNoPendingMembership();
 });
@@ -929,12 +912,14 @@ test("gap recovery supersedes completed catch-up and pages through the current t
       cursor: { epoch: "epoch-agent-a", seq: 10 },
       limit: 40,
       projection: "projected",
+      wholeTurns: true,
     },
     {
       direction: "after",
       cursor: { epoch: "epoch-agent-a", seq: 15 },
       limit: 40,
       projection: "projected",
+      wholeTurns: true,
     },
   ]);
 });

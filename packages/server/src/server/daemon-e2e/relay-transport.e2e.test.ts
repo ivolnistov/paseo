@@ -7,7 +7,10 @@ import {
   encodeTerminalStreamFrame,
   TerminalStreamOpcode,
 } from "@getpaseo/protocol/binary-frames/index";
-import type { DaemonClient as HostClient } from "@getpaseo/client/internal/daemon-client";
+import {
+  getDaemonAuthFailureReason,
+  type DaemonClient as HostClient,
+} from "@getpaseo/client/internal/daemon-client";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { describe, expect, test } from "vitest";
 import { withTimeout } from "../../utils/promise-timeout.js";
@@ -540,7 +543,7 @@ async function waitForCapturedLog(
     120000,
   );
 
-  test("password-protected daemon admits a relay client without the password (owner COMPAT), refuses a wrong one", async () => {
+  test("password-protected daemon refuses a relay client without the password", async () => {
     let daemon: Awaited<ReturnType<typeof createTestPaseoDaemon>> | undefined;
     const clients: HostClient[] = [];
     try {
@@ -570,9 +573,12 @@ async function waitForCapturedLog(
         return client.connect();
       };
 
-      // COMPAT(relayPasswordOptional): the owner accepts that the pairing offer alone admits the owner over relay.
-      await connectOverRelay();
-      expect((await createPaseoApi(clients.at(-1)!).workspaces.list()).entries).toEqual([]);
+      // The pairing offer alone must not grant access to a password-protected daemon.
+      const rejection = await connectOverRelay().then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(getDaemonAuthFailureReason(rejection)).toBe("password_required");
       await expect(connectOverRelay("wrong-password")).rejects.toThrow("Incorrect password");
 
       await connectOverRelay("relay-password");

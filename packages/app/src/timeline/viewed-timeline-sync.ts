@@ -109,6 +109,15 @@ class TimelineReplicaOwner implements TimelineReplica {
   async prepare(agentId: string): Promise<void> {
     const existing = this.preparations.get(agentId);
     if (existing) return existing;
+    const timeline = selectAgentTimelineState(
+      useSessionStore.getState().sessions[this.serverId],
+      agentId,
+    );
+    // A route and the visible-chat owner can both prepare before catch-up finishes.
+    // Repainting that same cache would treat its history as a live head.
+    if (timeline.status !== "cold" && this.cachedRanges.has(agentId)) {
+      return;
+    }
     const preparation = this.load(agentId).finally(() => {
       if (this.preparations.get(agentId) === preparation) {
         this.preparations.delete(agentId);
@@ -334,8 +343,6 @@ export interface ViewedTimelineUiBridge {
 }
 
 export interface ViewedTimelineSync extends ViewedTimelineUiBridge {
-  /** Pending visible catch-up, including cache preparation and subscription acknowledgement. */
-  isVisibleCatchUpPending(): boolean;
   /**
    * The agent tabs that currently exist in workspace layout. This only ever *releases*
    * subscriptions: closing a tab drops its chat. It never adds one, because layout is
@@ -825,12 +832,6 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
   };
 
   return {
-    isVisibleCatchUpPending() {
-      return (
-        active &&
-        visibleAgentIds().some((id) => visibilityCatchUpPending.has(id) || manualRetries.has(id))
-      );
-    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -852,17 +853,12 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       publishVisibleMembership();
     },
     replaceVisibleAgentIds(sourceId, agentIds) {
-      const previousVisible = visibleAgentIds();
-      const previousDesired = desired;
       const normalized = normalizeAgentIds(agentIds);
       if (normalized.length === 0) sources.delete(sourceId);
       else sources.set(sourceId, normalized);
       rememberOpenedAgentIds(normalized);
       publishVisibleMembership();
       startAcknowledgedCatchUps();
-      if (previousDesired === desired && !sameAgentIds(previousVisible, visibleAgentIds())) {
-        notifyListeners();
-      }
     },
     setActive(nextActive) {
       if (active === nextActive) return;
@@ -870,7 +866,6 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       publishVisibleMembership();
       if (!active) {
         startAcknowledgedCatchUps();
-        notifyListeners();
         return;
       }
       for (const agentId of visibleAgentIds()) {

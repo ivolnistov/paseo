@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { relative as relativePath } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -142,6 +145,10 @@ test("focused contracts stay inside existing required checks", () => {
 
   assert.match(changes, /scripts\/daemon-launch-contract\.test\.mjs/);
   assert.doesNotMatch(changes, /Install dependencies|npm run build/);
+  for (const workflow of ["fork-build.yml", "fork-release.yml"]) {
+    const source = readFileSync(new URL(`.github/workflows/${workflow}`, repoRoot), "utf8");
+    assert.match(source, /PASEO_FORK_CONTRACTS: "1"\s+run: node --test .*ci-workflow\.test\.mjs/);
+  }
 
   assert.match(server, /test:hub-cli-contract/);
   assert.match(server, /npm run test --workspace=@getpaseo\/server/);
@@ -152,6 +159,14 @@ test("focused contracts stay inside existing required checks", () => {
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
   assert.ok(!jobs.has("desktop-browser-bridge"));
   assert.ok(!jobs.has("playwright-desktop"));
+});
+
+test("ordinary CI keeps app tests without prebuilding Android modules", () => {
+  const source = readFileSync(ciWorkflowPath, "utf8");
+  const app = jobBlocks(source).get("app-tests").join("\n");
+  assert.match(app, /npm run build:app-deps/);
+  assert.match(app, /npm run test --workspace=@getpaseo\/app/);
+  assert.doesNotMatch(source, /test:android|expo prebuild|gradlew|actions\/setup-java/);
 });
 
 test("server builds exclude test utilities at every domain depth", () => {
@@ -480,14 +495,14 @@ test("Windows units and integration run independently with complete routed cover
   assert.equal(scripts.test, "npm run test:unit && npm run test:integration");
   assert.equal(scripts["test:unit"], 'vitest run --fileParallelism --exclude "**/*.e2e.test.ts"');
   const invocations = scripts["test:integration"].split(" && ");
-  // Each vitest start costs about half a minute on Windows, so the four
+  // Each vitest start costs about half a minute on Windows, so the
   // name-filtered files share one invocation and one combined filter.
   assert.equal(invocations.length, 2);
   assert.ok(invocations.every((command) => command.startsWith("vitest run --maxWorkers=1 ")));
   assert.doesNotMatch(invocations[0], / -t /);
   assert.equal(
     invocations[1],
-    'vitest run --maxWorkers=1 src/server/daemon-e2e/git-operations.e2e.test.ts src/server/session.create-agent-worktree-autoarchive.e2e.test.ts src/server/agent/providers/opencode-bridge.local.e2e.test.ts src/server/daemon-e2e/relay-transport.e2e.test.ts -t "merges into|creates a worktree and auto-archives both|versioned runtime|oversized attachments|connected hosts|password-protected daemon refuses"',
+    'vitest run --maxWorkers=1 src/server/agent/providers/omp/history.e2e.test.ts src/server/daemon-e2e/git-operations.e2e.test.ts src/server/session.create-agent-worktree-autoarchive.e2e.test.ts src/server/agent/providers/opencode-bridge.local.e2e.test.ts src/server/daemon-e2e/relay-transport.e2e.test.ts -t "merges into|creates a worktree and auto-archives both|versioned runtime|oversized attachments|connected hosts|password-protected daemon refuses|replays selected OMP history"',
   );
   const serverConfig = readFileSync(new URL("packages/server/vitest.config.ts", repoRoot), "utf8");
   assert.doesNotMatch(serverConfig, /maxWorkers/);
@@ -531,223 +546,340 @@ test("Windows units and integration run independently with complete routed cover
   }
 });
 
+test("macOS release retries only transient stapling failures without rebuilding the signed app", async (t) => {
+  const workflow = readFileSync(new URL(".github/workflows/desktop-release.yml", repoRoot), "utf8");
+  const wrapper = workflow
+    .match(/<<'STAPLER'\n([\s\S]*?)\n          STAPLER/)[1]
+    .replace(/^          /gm, "");
+  const networkError =
+    'Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."';
+  const cases = [
+    {
+      name: "success",
+      outcomes: [0],
+      output: "stapled",
+      command: "stapler",
+      expected: 0,
+      attempts: 1,
+    },
+    {
+      name: "transient then success",
+      outcomes: [68, 0],
+      output: networkError,
+      command: "stapler",
+      expected: 0,
+      attempts: 2,
+    },
+    {
+      name: "exhausted network retries",
+      outcomes: [68, 68, 68, 68, 0],
+      output: networkError,
+      command: "stapler",
+      expected: 68,
+      attempts: 4,
+    },
+    {
+      name: "non-network staple error",
+      outcomes: [68, 0],
+      output: "ticket not found",
+      command: "stapler",
+      expected: 68,
+      attempts: 1,
+    },
+    {
+      name: "different exit code",
+      outcomes: [1, 0],
+      output: networkError,
+      command: "stapler",
+      expected: 1,
+      attempts: 1,
+    },
+    {
+      name: "notary submission is not retried",
+      outcomes: [68, 0],
+      output: networkError,
+      command: "notarytool",
+      expected: 68,
+      attempts: 1,
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, () => {
+      const directory = mkdtempSync(join(tmpdir(), "stapler-retry-"));
+      try {
+        const statePath = join(directory, "state.json");
+        const realXcrun = join(directory, "real-xcrun");
+        const wrapperPath = join(directory, "xcrun");
+        writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+        writeFileSync(join(directory, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        writeFileSync(
+          statePath,
+          JSON.stringify({ outcomes: scenario.outcomes, output: scenario.output, calls: [] }),
+        );
+        writeFileSync(
+          realXcrun,
+          `#!/usr/bin/env node
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.env.STAPLER_STATE, "utf8"));
+state.calls.push(process.argv.slice(2));
+const code = state.outcomes.shift();
+fs.writeFileSync(process.env.STAPLER_STATE, JSON.stringify(state));
+console.log(state.output);
+process.exit(code);
+`,
+          { mode: 0o755 },
+        );
+        const args = [scenario.command, "staple", "-v", "Paseo signed.app"];
+        const result = spawnSync("bash", [wrapperPath, ...args], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PASEO_REAL_XCRUN: realXcrun,
+            STAPLER_STATE: statePath,
+            PATH: `${directory}:${process.env.PATH}`,
+          },
+          timeout: 5000,
+        });
+        assert.equal(result.status, scenario.expected, result.stdout + result.stderr);
+        const state = JSON.parse(readFileSync(statePath, "utf8"));
+        assert.deepEqual(
+          state.calls,
+          Array.from({ length: scenario.attempts }, () => args),
+        );
+        assert.match(result.stdout, /stapled|network connection was lost|ticket not found/);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 // ---- Fork delivery boundary (fork-integration-20261024 N4). The fork may never deploy or publish as upstream,
 // its ordinary builds hold no credentials, and only gated release jobs may write packages or releases.
-const { parse: parseYaml } = await import("yaml");
-const workflowsDir = new URL(".github/workflows/", repoRoot);
-const OFFICIAL_GUARD = /github\.repository(_owner)?\s*==\s*'getpaseo(\/paseo)?'/;
-const inheritedDeployWorkflows = [
-  "android-apk-release.yml",
-  "deploy-app.yml",
-  "deploy-relay.yml",
-  "deploy-website.yml",
-  "desktop-release.yml",
-  "desktop-rollout.yml",
-  "docker.yml",
-  "nix-update-hash.yml",
-  "release-notes-sync.yml",
-];
+if (process.env.PASEO_FORK_CONTRACTS === "1") {
+  const { parse: parseYaml } = await import("yaml");
+  const workflowsDir = new URL(".github/workflows/", repoRoot);
+  const OFFICIAL_GUARD = /github\.repository(_owner)?\s*==\s*'getpaseo(\/paseo)?'/;
+  const inheritedDeployWorkflows = [
+    "android-apk-release.yml",
+    "deploy-app.yml",
+    "deploy-relay.yml",
+    "deploy-website.yml",
+    "desktop-release.yml",
+    "desktop-rollout.yml",
+    "docker.yml",
+    "nix-update-hash.yml",
+    "release-notes-sync.yml",
+  ];
 
-function loadWorkflow(name) {
-  return parseYaml(readFileSync(new URL(name, workflowsDir), "utf8"));
-}
+  function loadWorkflow(name) {
+    return parseYaml(readFileSync(new URL(name, workflowsDir), "utf8"));
+  }
 
-function writesAnything(permissions) {
-  if (permissions === "write-all") return true;
-  return (
-    Boolean(permissions) &&
-    typeof permissions === "object" &&
-    Object.values(permissions).includes("write")
-  );
-}
+  function writesAnything(permissions) {
+    if (permissions === "write-all") return true;
+    return (
+      Boolean(permissions) &&
+      typeof permissions === "object" &&
+      Object.values(permissions).includes("write")
+    );
+  }
 
-function usesSecrets(value) {
-  return /\$\{\{\s*secrets\./.test(JSON.stringify(value ?? ""));
-}
+  function usesSecrets(value) {
+    return /\$\{\{\s*secrets\./.test(JSON.stringify(value ?? ""));
+  }
 
-test("inherited deploy and publish jobs only run in the official repository", () => {
-  for (const file of inheritedDeployWorkflows) {
-    const workflow = loadWorkflow(file);
+  test("inherited deploy and publish jobs only run in the official repository", () => {
+    for (const file of inheritedDeployWorkflows) {
+      const workflow = loadWorkflow(file);
+      for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
+        const privileged =
+          usesSecrets(job) ||
+          writesAnything(job.permissions) ||
+          writesAnything(workflow.permissions);
+        if (!privileged) continue;
+        assert.match(
+          String(job.if ?? ""),
+          OFFICIAL_GUARD,
+          `${file} job ${id} needs an official-repository guard`,
+        );
+      }
+    }
+  });
+
+  test("the fork build workflow is read-only and credential-free", () => {
+    const workflow = loadWorkflow("fork-build.yml");
+    assert.deepEqual(workflow.permissions, { contents: "read" });
     for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
-      const privileged =
-        usesSecrets(job) || writesAnything(job.permissions) || writesAnything(workflow.permissions);
-      if (!privileged) continue;
-      assert.match(
-        String(job.if ?? ""),
-        OFFICIAL_GUARD,
-        `${file} job ${id} needs an official-repository guard`,
+      assert.ok(!writesAnything(job.permissions), `fork-build job ${id} must not write`);
+      assert.ok(!usesSecrets(job), `fork-build job ${id} must not read secrets`);
+      assert.equal(
+        job.environment,
+        undefined,
+        `fork-build job ${id} must not use a protected environment`,
       );
     }
-  }
-});
+  });
 
-test("the fork build workflow is read-only and credential-free", () => {
-  const workflow = loadWorkflow("fork-build.yml");
-  assert.deepEqual(workflow.permissions, { contents: "read" });
-  for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
-    assert.ok(!writesAnything(job.permissions), `fork-build job ${id} must not write`);
-    assert.ok(!usesSecrets(job), `fork-build job ${id} must not read secrets`);
-    assert.equal(
-      job.environment,
-      undefined,
-      `fork-build job ${id} must not use a protected environment`,
-    );
-  }
-});
+  test("the fork release is manual, pinned to an explicit tag, commit and version", () => {
+    const workflow = loadWorkflow("fork-release.yml");
+    const on = workflow.on ?? workflow[true];
+    assert.deepEqual(Object.keys(on), ["workflow_dispatch"], "no push, tag or schedule triggers");
+    for (const input of ["tag", "sha", "version"]) {
+      assert.equal(
+        on.workflow_dispatch.inputs?.[input]?.required,
+        true,
+        `input ${input} is required`,
+      );
+    }
+    assert.ok(!writesAnything(workflow.permissions), "no workflow-wide write permission");
+  });
 
-test("the fork release is manual, pinned to an explicit tag, commit and version", () => {
-  const workflow = loadWorkflow("fork-release.yml");
-  const on = workflow.on ?? workflow[true];
-  assert.deepEqual(Object.keys(on), ["workflow_dispatch"], "no push, tag or schedule triggers");
-  for (const input of ["tag", "sha", "version"]) {
-    assert.equal(
-      on.workflow_dispatch.inputs?.[input]?.required,
-      true,
-      `input ${input} is required`,
-    );
-  }
-  assert.ok(!writesAnything(workflow.permissions), "no workflow-wide write permission");
-});
-
-test("fork release credentials stay in their protected jobs", () => {
-  const { jobs } = loadWorkflow("fork-release.yml");
-  const apk = jobs["release-apk"];
-  assert.ok(apk?.environment, "release-apk runs in a protected environment");
-  assert.match(
-    JSON.stringify(apk),
-    /scripts\/build-apk\.sh/,
-    "release-apk builds and signs through the reviewed helper",
-  );
-  assert.ok(!writesAnything(apk.permissions), "release-apk does not write packages or contents");
-
-  const packages = jobs["publish-packages"];
-  assert.ok(packages?.environment, "publish-packages runs in a protected environment");
-  assert.deepEqual(packages.permissions, { contents: "read", packages: "write" });
-  assert.ok([packages.needs].flat().length > 0, "publish-packages consumes earlier artifacts");
-  assert.match(
-    JSON.stringify(packages),
-    /fork-release\.mjs plan-publish/,
-    "validates the exact manifest before publishing",
-  );
-  assert.match(JSON.stringify(packages), /https:\/\/npm\.pkg\.github\.com/);
-
-  const release = jobs["publish-release"];
-  assert.ok(release?.environment, "publish-release runs in a protected environment");
-  assert.deepEqual(release.permissions, { contents: "write" });
-  assert.ok([release.needs].flat().includes("release-apk"), "publishes the APK built in this run");
-
-  for (const [id, job] of Object.entries(jobs)) {
-    if (["release-apk", "publish-packages", "publish-release"].includes(id)) continue;
-    assert.ok(
-      !usesSecrets(job) && !writesAnything(job.permissions) && !job.environment,
-      `${id} is an ordinary job`,
-    );
-  }
-});
-
-// ---- N8: release wiring. Workflow checks only; packer behaviour is covered by the packer's fixture tests.
-const releaseJobs = () => loadWorkflow("fork-release.yml").jobs;
-const stepsText = (job) => (job?.steps ?? []).map((step) => JSON.stringify(step));
-
-test("ci.yml runs with a read-only default token", () => {
-  assert.deepEqual(loadWorkflow("ci.yml").permissions, { contents: "read" });
-});
-
-test("release-apk adopts its dependency install instead of installing twice", () => {
-  const apk = releaseJobs()["release-apk"];
-  const build = stepsText(apk).find((step) => step.includes("scripts/build-apk.sh"));
-  assert.ok(build, "release-apk builds through build-apk.sh");
-  if (stepsText(apk).some((step) => /npm ci\b/.test(step))) {
+  test("fork release credentials stay in their protected jobs", () => {
+    const { jobs } = loadWorkflow("fork-release.yml");
+    const apk = jobs["release-apk"];
+    assert.ok(apk?.environment, "release-apk runs in a protected environment");
     assert.match(
-      build,
-      /--deps-receipt/,
-      "a job that already ran npm ci hands its receipt to build-apk.sh",
+      JSON.stringify(apk),
+      /scripts\/build-apk\.sh/,
+      "release-apk builds and signs through the reviewed helper",
     );
-  }
-});
+    assert.ok(!writesAnything(apk.permissions), "release-apk does not write packages or contents");
 
-test("release-apk pins the source's SDK and NDK and keeps a secret-free Gradle cache", () => {
-  const apk = releaseJobs()["release-apk"];
-  const catalog = readFileSync(
-    new URL("node_modules/react-native/gradle/libs.versions.toml", repoRoot),
-    "utf8",
-  );
-  const pin = (key) => catalog.match(new RegExp(`^${key} = "([^"]+)"`, "m"))?.[1];
-  const text = JSON.stringify(apk.steps);
-  for (const key of ["ndkVersion", "buildTools"]) {
-    assert.ok(text.includes(pin(key)), `release-apk installs ${key} ${pin(key)}`);
-  }
-  assert.ok(
-    text.includes(`platforms;android-${pin("compileSdk")}`),
-    `release-apk installs android-${pin("compileSdk")}`,
-  );
-  const cache = (apk.steps ?? []).find((step) =>
-    /actions\/cache|gradle\/actions\/setup-gradle/.test(String(step.uses)),
-  );
-  assert.ok(cache, "release-apk keeps a persistent Gradle cache");
-  assert.ok(!usesSecrets(cache), "the cache step reads no secrets");
-  const paths = String(cache.with?.path ?? "");
-  for (const forbidden of ["keystore", ".npmrc", "google-services", "android/app", "storepass"]) {
-    assert.ok(!paths.includes(forbidden), `the cache holds no ${forbidden}`);
-  }
-});
+    const packages = jobs["publish-packages"];
+    assert.ok(packages?.environment, "publish-packages runs in a protected environment");
+    assert.deepEqual(packages.permissions, { contents: "read", packages: "write" });
+    assert.ok([packages.needs].flat().length > 0, "publish-packages consumes earlier artifacts");
+    assert.match(
+      JSON.stringify(packages),
+      /fork-release\.mjs plan-publish/,
+      "validates the exact manifest before publishing",
+    );
+    assert.match(JSON.stringify(packages), /https:\/\/npm\.pkg\.github\.com/);
 
-test("packing builds the daemon web UI before preparing the packages", () => {
-  const steps = stepsText(releaseJobs().pack);
-  const ui = steps.findIndex((step) => step.includes("build:daemon-web-ui"));
-  const prepare = steps.findIndex((step) => step.includes("fork-release.mjs prepare"));
-  assert.ok(ui >= 0 && prepare > ui, "build:daemon-web-ui runs before prepare");
-});
+    const release = jobs["publish-release"];
+    assert.ok(release?.environment, "publish-release runs in a protected environment");
+    assert.deepEqual(release.permissions, { contents: "write" });
+    assert.ok(
+      [release.needs].flat().includes("release-apk"),
+      "publishes the APK built in this run",
+    );
 
-test("pack and publish run only after checks of the exact dispatched commit", () => {
-  const jobs = releaseJobs();
-  const checks = [jobs.pack.needs]
-    .flat()
-    .filter((id) => id !== "validate")
-    .map((id) => jobs[id]);
-  assert.ok(
-    checks.some((job) =>
-      stepsText(job).some((step) => /npm run (typecheck|lint)|node --test|vitest run/.test(step)),
-    ),
-    "pack depends on a check job of this run",
-  );
-  for (const [id, job] of Object.entries(jobs)) {
-    for (const step of job.steps ?? []) {
-      if (String(step.uses).startsWith("actions/checkout")) {
-        assert.match(
-          JSON.stringify(step.with ?? {}),
-          /inputs\.sha|needs\.validate\.outputs/,
-          `${id} checks out the dispatched commit`,
-        );
-      }
-      if (String(step.uses).startsWith("actions/download-artifact")) {
-        assert.ok(
-          !("run-id" in (step.with ?? {})) && !("github-token" in (step.with ?? {})),
-          `${id} uses only this run's artifacts`,
-        );
+    for (const [id, job] of Object.entries(jobs)) {
+      if (["release-apk", "publish-packages", "publish-release"].includes(id)) continue;
+      assert.ok(
+        !usesSecrets(job) && !writesAnything(job.permissions) && !job.environment,
+        `${id} is an ordinary job`,
+      );
+    }
+  });
+
+  // ---- N8: release wiring. Workflow checks only; packer behaviour is covered by the packer's fixture tests.
+  const releaseJobs = () => loadWorkflow("fork-release.yml").jobs;
+  const stepsText = (job) => (job?.steps ?? []).map((step) => JSON.stringify(step));
+
+  test("ci.yml runs with a read-only default token", () => {
+    assert.deepEqual(loadWorkflow("ci.yml").permissions, { contents: "read" });
+  });
+
+  test("release-apk adopts its dependency install instead of installing twice", () => {
+    const apk = releaseJobs()["release-apk"];
+    const build = stepsText(apk).find((step) => step.includes("scripts/build-apk.sh"));
+    assert.ok(build, "release-apk builds through build-apk.sh");
+    if (stepsText(apk).some((step) => /npm ci\b/.test(step))) {
+      assert.match(
+        build,
+        /--deps-receipt/,
+        "a job that already ran npm ci hands its receipt to build-apk.sh",
+      );
+    }
+  });
+
+  test("release-apk pins the source's SDK and NDK and keeps a secret-free Gradle cache", () => {
+    const apk = releaseJobs()["release-apk"];
+    const catalog = readFileSync(
+      new URL("node_modules/react-native/gradle/libs.versions.toml", repoRoot),
+      "utf8",
+    );
+    const pin = (key) => catalog.match(new RegExp(`^${key} = "([^"]+)"`, "m"))?.[1];
+    const text = JSON.stringify(apk.steps);
+    for (const key of ["ndkVersion", "buildTools"]) {
+      assert.ok(text.includes(pin(key)), `release-apk installs ${key} ${pin(key)}`);
+    }
+    assert.ok(
+      text.includes(`platforms;android-${pin("compileSdk")}`),
+      `release-apk installs android-${pin("compileSdk")}`,
+    );
+    const cache = (apk.steps ?? []).find((step) =>
+      /actions\/cache|gradle\/actions\/setup-gradle/.test(String(step.uses)),
+    );
+    assert.ok(cache, "release-apk keeps a persistent Gradle cache");
+    assert.ok(!usesSecrets(cache), "the cache step reads no secrets");
+    const paths = String(cache.with?.path ?? "");
+    for (const forbidden of ["keystore", ".npmrc", "google-services", "android/app", "storepass"]) {
+      assert.ok(!paths.includes(forbidden), `the cache holds no ${forbidden}`);
+    }
+  });
+
+  test("packing builds the daemon web UI before preparing the packages", () => {
+    const steps = stepsText(releaseJobs().pack);
+    const ui = steps.findIndex((step) => step.includes("build:daemon-web-ui"));
+    const prepare = steps.findIndex((step) => step.includes("fork-release.mjs prepare"));
+    assert.ok(ui >= 0 && prepare > ui, "build:daemon-web-ui runs before prepare");
+  });
+
+  test("pack and publish run only after checks of the exact dispatched commit", () => {
+    const jobs = releaseJobs();
+    const checks = [jobs.pack.needs]
+      .flat()
+      .filter((id) => id !== "validate")
+      .map((id) => jobs[id]);
+    assert.ok(
+      checks.some((job) =>
+        stepsText(job).some((step) => /npm run (typecheck|lint)|node --test|vitest run/.test(step)),
+      ),
+      "pack depends on a check job of this run",
+    );
+    for (const [id, job] of Object.entries(jobs)) {
+      for (const step of job.steps ?? []) {
+        if (String(step.uses).startsWith("actions/checkout")) {
+          assert.match(
+            JSON.stringify(step.with ?? {}),
+            /inputs\.sha|needs\.validate\.outputs/,
+            `${id} checks out the dispatched commit`,
+          );
+        }
+        if (String(step.uses).startsWith("actions/download-artifact")) {
+          assert.ok(
+            !("run-id" in (step.with ?? {})) && !("github-token" in (step.with ?? {})),
+            `${id} uses only this run's artifacts`,
+          );
+        }
       }
     }
-  }
-  const steps = stepsText(jobs["publish-packages"]);
-  const plans = steps.map((step, i) => [step, i]).filter(([step]) => step.includes("plan-publish"));
-  assert.ok(plans.length > 0, "publish-packages validates through plan-publish");
-  for (const [step] of plans) {
-    for (const flag of ["--version", "--source-sha"])
-      assert.ok(step.includes(flag), `every plan-publish binds ${flag}`);
-  }
-  const bound = plans.find(([step]) => step.includes("--existing"));
-  assert.ok(bound, "publish-packages binds plan-publish --existing");
-  const publishAt = steps.findIndex((step) => step.includes("npm publish"));
-  assert.ok(publishAt > bound[1], "the existing-version plan runs before npm publish");
-});
+    const steps = stepsText(jobs["publish-packages"]);
+    const plans = steps
+      .map((step, i) => [step, i])
+      .filter(([step]) => step.includes("plan-publish"));
+    assert.ok(plans.length > 0, "publish-packages validates through plan-publish");
+    for (const [step] of plans) {
+      for (const flag of ["--version", "--source-sha"])
+        assert.ok(step.includes(flag), `every plan-publish binds ${flag}`);
+    }
+    const bound = plans.find(([step]) => step.includes("--existing"));
+    assert.ok(bound, "publish-packages binds plan-publish --existing");
+    const publishAt = steps.findIndex((step) => step.includes("npm publish"));
+    assert.ok(publishAt > bound[1], "the existing-version plan runs before npm publish");
+  });
 
-// npm refuses to publish a prerelease version (every fork version, e.g. 0.13.0-fork.N) without an explicit
-// dist-tag: "You must specify a tag using --tag when publishing a prerelease version". The owned packages keep
-// the default channel the self-updater installs from (`@ivolnistov/paseo@latest`).
-test("the owned publish command names the latest dist-tag explicitly", () => {
-  const publish = stepsText(releaseJobs()["publish-packages"]).find((step) =>
-    /npm publish\b/.test(step),
-  );
-  assert.ok(publish, "publish-packages runs npm publish");
-  assert.match(publish, /npm publish[^\n]*--tag latest\b/, "npm publish passes --tag latest");
-});
+  // npm refuses to publish a prerelease version (every fork version, e.g. 0.13.0-fork.N) without an explicit
+  // dist-tag: "You must specify a tag using --tag when publishing a prerelease version". The owned packages keep
+  // the default channel the self-updater installs from (`@ivolnistov/paseo@latest`).
+  test("the owned publish command names the latest dist-tag explicitly", () => {
+    const publish = stepsText(releaseJobs()["publish-packages"]).find((step) =>
+      /npm publish\b/.test(step),
+    );
+    assert.ok(publish, "publish-packages runs npm publish");
+    assert.match(publish, /npm publish[^\n]*--tag latest\b/, "npm publish passes --tag latest");
+  });
+}

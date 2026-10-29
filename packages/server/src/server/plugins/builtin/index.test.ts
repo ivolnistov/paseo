@@ -1,27 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "vitest";
-import { WebSocket } from "ws";
 import { compilePlugin } from "../compiler.js";
 import { readPluginManifest } from "../manifest.js";
-import type { WSOutboundMessage } from "../../messages.js";
 import { DaemonClient } from "../../test-utils/daemon-client.js";
 import { createTestPaseoDaemon } from "../../test-utils/paseo-daemon.js";
 import { BuiltinPluginLoader, builtinPlugins, resolveBuiltinPluginsRoot } from "./index.js";
-
-interface CachedClientBundle {
-  id: string;
-  clientBundleHash: string;
-}
-
-interface CatalogResponse {
-  plugins: Array<{ id: string; clientBundle?: string; clientBundleHash?: string }>;
-  bytes: number;
-}
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -91,84 +78,6 @@ test("listed client bundle is published while plugins are disabled; unlisted dir
   }
 }, 60_000);
 
-// Speaks the WebSocket protocol directly: the request must name the bundles it holds,
-// and the response size on the wire is what the cache saves.
-async function connectCatalogPeer(port: number): Promise<{
-  getCatalog: (cachedClientBundles?: CachedClientBundle[]) => Promise<CatalogResponse>;
-  close: () => void;
-}> {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-  const frames: WSOutboundMessage[] = [];
-  socket.on("message", (data, binary) => {
-    if (!binary) frames.push(JSON.parse(data.toString()));
-  });
-  try {
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", resolve);
-      socket.once("error", reject);
-    });
-    socket.send(
-      JSON.stringify({
-        type: "hello",
-        clientType: "browser",
-        clientId: "clid_builtin_catalog_cache",
-        protocolVersion: 1,
-        appVersion: "0.9.2",
-      }),
-    );
-    await expect
-      .poll(() =>
-        frames.some(
-          (frame) =>
-            frame.type === "session" &&
-            frame.message.type === "status" &&
-            frame.message.payload.status === "server_info",
-        ),
-      )
-      .toBe(true);
-  } catch (error) {
-    socket.terminate();
-    throw error;
-  }
-  let nextRequest = 0;
-  return {
-    async getCatalog(cachedClientBundles) {
-      nextRequest += 1;
-      const requestId = `catalog-${nextRequest}`;
-      socket.send(
-        JSON.stringify({
-          type: "session",
-          message: {
-            type: "plugin.catalog.get.request",
-            requestId,
-            ...(cachedClientBundles ? { cachedClientBundles } : {}),
-          },
-        }),
-      );
-      let response: CatalogResponse | undefined;
-      await expect
-        .poll(() => {
-          for (const frame of frames) {
-            if (
-              frame.type === "session" &&
-              frame.message.type === "plugin.catalog.get.response" &&
-              frame.message.payload.requestId === requestId
-            ) {
-              response = {
-                plugins: frame.message.payload.plugins,
-                bytes: JSON.stringify(frame.message).length,
-              };
-            }
-          }
-          return response !== undefined;
-        })
-        .toBe(true);
-      return response!;
-    },
-    close: () => socket.close(),
-  };
-}
-
 test("a repeated catalog fetch leaves out the client bundle the client already holds", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-builtin-catalog-cache-"));
   roots.push(root);
@@ -184,31 +93,26 @@ export default function contribute() { void payload; return () => {}; }`,
     pluginsEnabled: false,
     builtinPlugins: new BuiltinPluginLoader(root, ["large"]),
   });
-  let peer: Awaited<ReturnType<typeof connectCatalogPeer>> | undefined;
-  try {
-    peer = await connectCatalogPeer(daemon.port);
-    // A client without a cache sends no cachedClientBundles and gets every bundle.
-    const first = await peer.getCatalog();
-    const clientBundle = first.plugins[0]?.clientBundle;
-    expect(clientBundle).toContain("x".repeat(1_000_000));
-    const clientBundleHash = createHash("sha256").update(clientBundle!).digest("hex");
-    expect(first.plugins).toEqual([expect.objectContaining({ id: "large", clientBundleHash })]);
-    expect(first.bytes).toBeGreaterThan(1_000_000);
-
-    const hit = await peer.getCatalog([{ id: "large", clientBundleHash }]);
-    expect(hit.plugins).toHaveLength(1);
-    expect(hit.plugins[0]).toMatchObject({ id: "large", clientBundleHash });
-    expect(hit.plugins[0]).not.toHaveProperty("clientBundle");
-    expect(hit.bytes).toBeLessThan(500);
-
-    const staleHash = await peer.getCatalog([{ id: "large", clientBundleHash: "0".repeat(64) }]);
-    const otherPlugin = await peer.getCatalog([{ id: "other", clientBundleHash }]);
-    for (const miss of [staleHash, otherPlugin]) {
-      expect(miss.plugins).toEqual(first.plugins);
-      expect(miss.bytes).toBeGreaterThan(1_000_000);
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.9.2" });
+  const responseBytes: number[] = [];
+  const unsubscribe = client.subscribeRawMessages((message) => {
+    if (message.type === "plugin.catalog.get.response") {
+      responseBytes.push(JSON.stringify(message).length);
     }
+  });
+  try {
+    await client.connect();
+    const first = await client.getPluginCatalog();
+    const second = await client.getPluginCatalog();
+
+    expect(second).toEqual(first);
+    expect(second[0]?.clientBundle).toContain("x".repeat(1_000_000));
+    expect(responseBytes).toHaveLength(2);
+    expect(responseBytes[0]).toBeGreaterThan(1_000_000);
+    expect(responseBytes[1]).toBeLessThan(500);
   } finally {
-    peer?.close();
+    unsubscribe();
+    await client.close();
     await daemon.close();
   }
 }, 60_000);

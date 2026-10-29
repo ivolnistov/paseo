@@ -52,6 +52,8 @@ jobs:
         working-directory: packages/cli
         run: npx vitest run --bail=1 src/commands/daemon/local-daemon.test.ts
       - name: Release contracts
+        env:
+          PASEO_FORK_CONTRACTS: "1"
         run: node --test scripts/daemon-launch-contract.test.mjs scripts/ci-workflow.test.mjs
 
   package-dry-run:

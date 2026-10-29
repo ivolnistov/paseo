@@ -73,6 +73,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - name: Release contracts
+        env:
+          PASEO_FORK_CONTRACTS: "1"
         run: node --test scripts/daemon-launch-contract.test.mjs scripts/ci-workflow.test.mjs
       - name: Server identity suites
         working-directory: packages/server

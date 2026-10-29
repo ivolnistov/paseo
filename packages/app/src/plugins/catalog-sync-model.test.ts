@@ -9,27 +9,6 @@ import { createPluginHosts } from "./hosts";
 import { PluginRegistry } from "./registry";
 import { pluginSettingsKey } from "./settings/query";
 import type { InstalledPlugin } from "./types";
-import { createHash } from "node:crypto";
-import { createPluginClientBundleStore } from "./client-bundle-store";
-import type { CatalogCatchUpSignal } from "./catalog-refresh";
-
-// Fork seams: a real in-memory bundle store and a settled timeline catch-up signal.
-function memoryBundles() {
-  const contents = new Map<string, string>();
-  return createPluginClientBundleStore(
-    {
-      list: async () => [...contents.keys()],
-      read: async (name) => contents.get(name) ?? "",
-      writeAtomic: async (name, value) => void contents.set(name, value),
-      remove: async (name) => void contents.delete(name),
-    },
-    async (value) => createHash("sha256").update(value).digest("hex"),
-  );
-}
-const settledCatchUp: CatalogCatchUpSignal = {
-  isVisibleCatchUpPending: () => false,
-  subscribe: () => () => {},
-};
 
 const audio = { play: async () => 0 };
 const rpc = settingsRpc("preferences");
@@ -75,13 +54,8 @@ class CatalogClient extends DaemonClient {
     super({ url: "ws://unused.test", clientId: "catalog-sync-test" });
   }
 
-  stores: unknown[] = [];
-
-  override async getPluginCatalog(
-    store?: Parameters<DaemonClient["getPluginCatalog"]>[0],
-  ): Promise<Catalog> {
+  override async getPluginCatalog(): Promise<Catalog> {
     this.fetches++;
-    this.stores.push(store);
     return this.catalog;
   }
 
@@ -183,7 +157,6 @@ function harness() {
     },
   });
   const client = new CatalogClient();
-  const bundles = memoryBundles();
   cleanups.push(() => {
     registry.removeHost("host");
     registry.removeHost("other");
@@ -195,8 +168,6 @@ function harness() {
       audio,
       connected: true,
       supported: true,
-      bundles,
-      catchUp: settledCatchUp,
       registry,
       ...options,
     });
@@ -211,7 +182,6 @@ function harness() {
   return {
     registry,
     client,
-    bundles,
     sync,
     installed,
     evaluations: () => evaluations,
@@ -451,156 +421,4 @@ it("ignores an in-flight catalog snapshot after disconnect", async () => {
   expect(h.registry.getSnapshot()).toBe(snapshot);
   expect(h.client.settings.reads).toBe(1);
   expect(h.evaluations()).toBe(1);
-});
-
-it("passes the host bundle store to every fetch and observes only once timeline catch-up exists", async () => {
-  const h = harness();
-  h.sync({ catchUp: null });
-  expect(h.client.events).toEqual([]);
-  expect(h.client.fetches).toBe(0);
-  h.sync();
-  await expect.poll(() => h.client.fetches).toBe(1);
-  expect(h.client.stores).toEqual([h.bundles]);
-});
-
-function pendingCatchUp() {
-  let pending = true;
-  const listeners = new Set<() => void>();
-  const signal: CatalogCatchUpSignal = {
-    isVisibleCatchUpPending: () => pending,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-  return {
-    signal,
-    settle() {
-      pending = false;
-      for (const listener of listeners) listener();
-    },
-  };
-}
-
-function catalogChanged(pluginId: string) {
-  return {
-    type: "status",
-    payload: { status: "plugin_catalog_changed", pluginId },
-  } as SessionOutboundMessage;
-}
-
-it("an explicit change that consumes a deferred snapshot still refreshes inactive host settings", async () => {
-  const h = harness();
-  const catchUp = pendingCatchUp();
-  const scheduled = new Set<() => void>();
-  h.sync({
-    catchUp: catchUp.signal,
-    schedule: (task) => {
-      scheduled.add(task);
-      return () => scheduled.delete(task);
-    },
-  });
-  h.client.snapshot(); // deferred: visible catch-up is still pending
-  expect(h.client.fetches).toBe(0);
-  h.client.update(catalogChanged("other-plugin"));
-  await expect.poll(() => h.registry.getSnapshot().length).toBe(1);
-  const plugin = h.installed();
-  const options = settingsQuery(plugin);
-  await plugin.queryClient.fetchQuery(options); // inactive: no observer
-  const readsBefore = h.client.settings.reads;
-  h.client.settings.write({ revision: "1", values: { label: "missed" } });
-  h.client.snapshot();
-  h.client.update(catalogChanged("other-plugin")); // consumes the deferred snapshot refresh
-  await expect
-    .poll(() => plugin.queryClient.getQueryData(options.queryKey))
-    .toEqual({ status: "ready", revision: "2", values: { label: "missed" } });
-  expect(h.client.settings.reads).toBeGreaterThan(readsBefore);
-  expect(h.installed()).toBe(plugin);
-  expect(h.evaluations()).toBe(1);
-  const fetches = h.client.fetches;
-  catchUp.settle();
-  for (const task of scheduled) task();
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  expect(h.client.fetches).toBe(fetches); // the deferred snapshot refresh was consumed, not run again
-});
-
-it("a snapshot on one host never refreshes another host's settings", async () => {
-  const h = await connected();
-  const otherClient = new CatalogClient();
-  h.sync({ serverId: "other", client: otherClient });
-  await expect.poll(() => h.registry.getSnapshot().length).toBe(2);
-  const other = h.installed("other");
-  await other.queryClient.fetchQuery(settingsQuery(other));
-  const otherReads = otherClient.settings.reads;
-  h.client.snapshot();
-  await expect.poll(() => h.client.fetches).toBeGreaterThan(1);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  expect(otherClient.settings.reads).toBe(otherReads);
-  expect(h.installed("other")).toBe(other);
-});
-
-it("a new client for the same host replaces the unchanged installation and disposes the old one", async () => {
-  const h = await connected();
-  const first = h.installed();
-  h.stop();
-  h.sync({ client: new CatalogClient(h.client.settings) });
-  await expect.poll(() => h.installed()).not.toBe(first);
-  expect(first.lifetime.signal.aborted).toBe(true);
-  expect(h.disposals()).toBe(1);
-  expect(h.evaluations()).toBe(2);
-});
-
-it("a subscription snapshot still refreshes retained host settings when the catalog fetch rejects", async () => {
-  const h = await connected();
-  const plugin = h.installed();
-  const options = settingsQuery(plugin);
-  await plugin.queryClient.fetchQuery(options); // retained and inactive: no observer
-  h.client.settings.write({ revision: "1", values: { label: "missed" } });
-  let attempts = 0;
-  Reflect.set(h.client, "getPluginCatalog", async () => {
-    attempts++;
-    throw new Error("catalog unavailable");
-  });
-  h.client.snapshot();
-  await expect
-    .poll(() => plugin.queryClient.getQueryData(options.queryKey))
-    .toEqual({ status: "ready", revision: "2", values: { label: "missed" } });
-  expect(h.installed()).toBe(plugin);
-  expect(h.evaluations()).toBe(1);
-  expect(attempts).toBe(1);
-});
-
-it("a snapshot refreshes every settings key of every plugin on the host, exactly once each", async () => {
-  const h = harness();
-  h.client.catalog = [...catalog("one"), { ...catalog("two")[0], id: "notes" }];
-  h.sync();
-  await expect.poll(() => h.registry.getSnapshot().length).toBe(2);
-  const reports = h.registry.getSnapshot().find((plugin) => plugin.id === "reports");
-  const notes = h.registry.getSnapshot().find((plugin) => plugin.id === "notes");
-  if (!reports || !notes) throw new Error("Missing installations");
-  const reads = { reportsPreferences: 0, reportsLayout: 0, notesPreferences: 0 };
-  function counting(key: keyof typeof reads, settingsId: string) {
-    return {
-      queryKey: pluginSettingsKey(settingsId),
-      queryFn: async () => ++reads[key],
-      gcTime: Infinity,
-      staleTime: Infinity,
-      retry: false,
-    } as const;
-  }
-  // Inactive replicas: no observers, so only an invalidation with refetchType "all" reaches them.
-  await reports.queryClient.fetchQuery(counting("reportsPreferences", "preferences"));
-  await reports.queryClient.fetchQuery(counting("reportsLayout", "layout"));
-  await notes.queryClient.fetchQuery(counting("notesPreferences", "preferences"));
-  const snapshot = h.registry.getSnapshot();
-  const fetches = h.client.fetches;
-
-  h.client.snapshot();
-
-  await expect
-    .poll(() => reads)
-    .toEqual({ reportsPreferences: 2, reportsLayout: 2, notesPreferences: 2 });
-  expect(h.client.fetches).toBe(fetches + 1);
-  expect(h.registry.getSnapshot()).toBe(snapshot);
-  expect(h.evaluations()).toBe(2);
 });

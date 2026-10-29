@@ -1,11 +1,9 @@
 import { useVoiceAudioEngineOptional } from "@/contexts/voice-context";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { pluginRegistry } from "./registry";
-import { useSessionStore } from "@/stores/session-store";
-import { createHostPluginClientBundleStore } from "./client-bundle-storage";
 import { syncPluginCatalog } from "./catalog-sync-model";
 
 export function PluginCatalogSync({
@@ -18,8 +16,6 @@ export function PluginCatalogSync({
   const audio = useVoiceAudioEngineOptional();
   const connected = useHostRuntimeIsConnected(serverId);
   const supported = useHostFeature(serverId, "plugins");
-  const timelineSync = useSessionStore((state) => state.sessions[serverId]?.viewedTimelineSync);
-  const bundles = useMemo(() => createHostPluginClientBundleStore(serverId), [serverId]);
 
   useEffect(
     () =>
@@ -29,11 +25,9 @@ export function PluginCatalogSync({
         audio,
         connected,
         supported,
-        bundles,
-        catchUp: timelineSync,
         registry: pluginRegistry,
       }),
-    [audio, bundles, client, connected, serverId, supported, timelineSync],
+    [audio, client, connected, serverId, supported],
   );
 
   useEffect(() => () => pluginRegistry.removeHost(serverId), [serverId]);

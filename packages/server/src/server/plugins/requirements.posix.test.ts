@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -75,11 +75,12 @@ it("rejects incompatible installs without persisting them, then accepts the corr
       id: "example",
       requirements: { paseo: "^0.8.0" },
       clientBundle: expect.any(String),
-      clientBundleHash: createHash("sha256")
-        .update(catalog[0]?.clientBundle ?? "")
-        .digest("hex"),
+      clientBundleHash: expect.any(String),
     },
   ]);
+  expect(catalog[0]!.clientBundleHash).toBe(
+    createHash("sha256").update(catalog[0]!.clientBundle).digest("hex"),
+  );
 });
 
 it("marks pre-0.8 plugins failed on startup and recovers after migration and reload", async () => {

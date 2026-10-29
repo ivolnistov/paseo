@@ -1642,6 +1642,77 @@ test("preserves legacy fetchAgent id overload", async () => {
   await expect(responsePromise).rejects.toThrow("legacy fetch sentinel");
 });
 
+test.each([undefined, false, true])(
+  "loads history with whole-turn support advertised as %s",
+  async (wholeTurnTimeline) => {
+    const transport = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "history-compatibility",
+      reconnect: { enabled: false },
+      transportFactory: () => transport.transport,
+    });
+    clients.push(client);
+    const connected = client.connect();
+    transport.triggerOpen({
+      features: wholeTurnTimeline === undefined ? {} : { wholeTurnTimeline },
+    });
+    await connected;
+
+    const requests = [
+      { direction: "tail" as const },
+      { direction: "before" as const, cursor: { epoch: "epoch-1", seq: 50 } },
+      { direction: "after" as const, cursor: { epoch: "epoch-1", seq: 50 } },
+      { direction: "before" as const, cursor: { epoch: "epoch-1", seq: 80 }, mergeWindow: true },
+    ];
+    for (const [index, request] of requests.entries()) {
+      const requestId = `history-${index}`;
+      const result = client.fetchAgentTimeline("agent-1", {
+        ...request,
+        requestId,
+        wholeTurns: true,
+        limit: 40,
+        projection: "projected",
+      });
+      // Attach immediately so the old rejection is captured by the regression.
+      const completed = expect(result).resolves.toMatchObject({ requestId, entries: [] });
+      expect(parseSentFrame(transport.sent.at(-1))).toEqual({
+        type: "fetch_agent_timeline_request",
+        agentId: "agent-1",
+        requestId,
+        ...request,
+        limit: 40,
+        projection: "projected",
+        ...(wholeTurnTimeline === true ? { wholeTurns: true } : {}),
+      });
+      transport.triggerMessage(
+        wrapSessionMessage({
+          type: "fetch_agent_timeline_response",
+          payload: {
+            requestId,
+            agentId: "agent-1",
+            agent: null,
+            direction: request.direction,
+            projection: "projected",
+            epoch: "epoch-1",
+            reset: false,
+            staleCursor: false,
+            gap: false,
+            window: { minSeq: 0, maxSeq: 0, nextSeq: 1 },
+            startCursor: null,
+            endCursor: null,
+            hasOlder: false,
+            hasNewer: false,
+            entries: [],
+            error: null,
+          },
+        }),
+      );
+      await completed;
+    }
+  },
+);
+
 test("honors explicit fetchAgentTimeline timeout below the session RPC default", async () => {
   useHeartbeatClock();
   const logger = createMockLogger();
@@ -2031,12 +2102,13 @@ test("gets a structured plugin log snapshot", async () => {
 });
 
 describe("plugin catalog", () => {
-  async function connectedClient() {
+  async function connectedClient(createStore?: (serverId: string) => PluginClientBundleStore) {
     const mock = createMockTransport();
     const client = new DaemonClient({
       url: "ws://test",
       clientId: "clsk_unit_test",
       logger: createMockLogger(),
+      createPluginClientBundleStore: createStore,
       reconnect: { enabled: false },
       transportFactory: () => mock.transport,
     });
@@ -2050,11 +2122,10 @@ describe("plugin catalog", () => {
   async function fetchCatalog(
     harness: Awaited<ReturnType<typeof connectedClient>>,
     respond: (request: Record<string, unknown>) => Array<Record<string, unknown>>,
-    store?: PluginClientBundleStore,
   ) {
     const before = harness.mock.sent.length;
-    const response = harness.client.getPluginCatalog(store);
-    if (store) await vi.waitFor(() => expect(harness.mock.sent.length).toBeGreaterThan(before));
+    const response = harness.client.getPluginCatalog();
+    await vi.waitFor(() => expect(harness.mock.sent.length).toBeGreaterThan(before));
     const request = parseSentFrame(harness.mock.sent.at(-1));
     harness.mock.triggerMessage(
       wrapSessionMessage({
@@ -2118,21 +2189,27 @@ describe("plugin catalog", () => {
         persisted = bundles;
       },
     };
+    const createdFor: string[] = [];
+    const createStore = (serverId: string) => {
+      createdFor.push(serverId);
+      return store;
+    };
     const bundle = { id: "kept", clientBundleHash: "hash-kept", clientBundle: "stored code" };
-    await fetchCatalog(await connectedClient(), () => [bundle], store);
-    const cold = await connectedClient();
-    const first = await fetchCatalog(
-      cold,
-      () => [{ id: "kept", clientBundleHash: "hash-kept" }],
-      store,
-    );
+    const warm = await connectedClient(createStore);
+    await fetchCatalog(warm, () => [bundle]);
+    const cold = await connectedClient(createStore);
+    const first = await fetchCatalog(cold, () => [{ id: "kept", clientBundleHash: "hash-kept" }]);
     expect(first.request.cachedClientBundles).toEqual([
       { id: "kept", clientBundleHash: "hash-kept" },
     ]);
     expect(first.plugins).toEqual([bundle]);
     expect(loads).toBe(2);
-    await fetchCatalog(cold, () => [], store);
+    await fetchCatalog(cold, () => []);
     expect(loads).toBe(2);
+    expect(createdFor).toEqual([
+      warm.client.getLastServerInfoMessage()!.serverId,
+      cold.client.getLastServerInfoMessage()!.serverId,
+    ]);
     expect(persisted).toEqual([]);
   });
 
@@ -2147,7 +2224,7 @@ describe("plugin catalog", () => {
         async replace() {},
       };
       const bundle = { id: "full", clientBundleHash: "hash-full", clientBundle: "full code" };
-      const result = await fetchCatalog(await connectedClient(), () => [bundle], store);
+      const result = await fetchCatalog(await connectedClient(() => store), () => [bundle]);
       expect(result.request).not.toHaveProperty("cachedClientBundles");
       expect(result.plugins).toEqual([bundle]);
     },
@@ -2163,10 +2240,47 @@ describe("plugin catalog", () => {
       },
     };
     const bundle = { id: "full", clientBundleHash: "hash-full", clientBundle: "full code" };
-    expect((await fetchCatalog(await connectedClient(), () => [bundle], store)).plugins).toEqual([
-      bundle,
-    ]);
+    expect(
+      (await fetchCatalog(await connectedClient(() => store), () => [bundle])).plugins,
+    ).toEqual([bundle]);
   });
+
+  test.each([false, true])(
+    "usable catalogs do not wait for storage; latest write survives a failed first write: %s",
+    async (failFirstWrite) => {
+      const writes: PluginClientBundle[][] = [];
+      let finishWrite = () => {};
+      const blockedWrite = new Promise<void>((resolve) => {
+        finishWrite = resolve;
+      });
+      const store: PluginClientBundleStore = {
+        async load() {
+          return [];
+        },
+        async replace(bundles) {
+          writes.push(bundles);
+          if (writes.length === 1) {
+            await blockedWrite;
+            if (failFirstWrite) throw new Error("Disk full");
+          }
+        },
+      };
+      const harness = await connectedClient(() => store);
+      const first = { id: "plugin", clientBundle: "old", clientBundleHash: "hash-old" };
+      const changed = { id: "plugin", clientBundle: "new", clientBundleHash: "hash-new" };
+      try {
+        expect((await fetchCatalog(harness, () => [first])).plugins).toEqual([first]);
+        await vi.waitFor(() => expect(writes).toEqual([[first]]));
+        expect((await fetchCatalog(harness, () => [changed])).plugins).toEqual([changed]);
+        expect((await fetchCatalog(harness, () => [])).plugins).toEqual([]);
+        expect(writes).toEqual([[first]]);
+        finishWrite();
+        await vi.waitFor(() => expect(writes).toEqual([[first], []]));
+      } finally {
+        finishWrite();
+      }
+    },
+  );
 });
 
 test("keeps a plugin reload pending past the session RPC deadline", async () => {
