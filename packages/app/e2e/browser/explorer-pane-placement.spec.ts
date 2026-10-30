@@ -311,6 +311,10 @@ test("reloading a saved hidden generated Explorer recovers a usable workspace", 
   await seedCorruptedWorkspaceLayout(page, workspace.workspaceId);
   await page.reload();
   await expectNewLauncher(page);
+  await expect(page.getByTestId("workspace-explorer-sidebar")).toHaveCount(1);
+  await expect(
+    page.getByTestId("workspace-explorer-sidebar").getByTestId("workspace-tabs-row"),
+  ).toHaveCount(0);
   await gotoWorkspace(page, otherWorkspace.workspaceId);
   await expect(draftTabChip(page)).toHaveCount(1);
 });
