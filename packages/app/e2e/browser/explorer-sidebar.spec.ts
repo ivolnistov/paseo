@@ -39,6 +39,22 @@ async function expectExplorerActiveTabForeground(
 }
 
 test.describe("Explorer sidebar", () => {
+  test("keeps the compact Explorer rail ready before opening", async ({ page }) => {
+    const workspace = await seedWorkspace({ repoPrefix: "explorer-compact-rail-" });
+    try {
+      await gotoWorkspace(page, workspace.workspaceId);
+      await page.setViewportSize({ width: 390, height: 844 });
+      const dock = page.getByTestId("workspace-explorer-sidebar");
+      await expect(dock).toHaveCount(1);
+      await expect(explorerSidebar(page)).toHaveCount(0);
+      await expect(dock.getByTestId("workspace-tabs-row")).toHaveCount(1);
+      const explorer = await ensureExplorerSidebar(page);
+      await expect(explorer.getByTestId("workspace-tab-files")).toBeVisible();
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
   test("starts with Files and Changes, switches views, and toggles without changing main", async ({
     page,
   }) => {
@@ -53,6 +69,7 @@ test.describe("Explorer sidebar", () => {
         .count();
 
       const explorer = await ensureExplorerSidebar(page);
+      const tabRow = await explorer.getByTestId("workspace-tabs-row").elementHandle();
       await expect(explorer.getByTestId("workspace-tab-files")).toBeVisible();
       await expect(explorer.getByTestId("workspace-tab-changes_tree")).toBeVisible();
       await expect(explorer.getByTestId("workspace-new-tab-button")).toHaveCount(1);
@@ -66,8 +83,18 @@ test.describe("Explorer sidebar", () => {
       await page.getByTestId("workspace-explorer-toggle").first().click();
       await expect(explorerSidebar(page)).toHaveCount(0);
       await expect(
+        page.getByTestId("workspace-explorer-sidebar").getByTestId("workspace-tabs-row"),
+      ).toHaveCount(1);
+      expect(await tabRow!.evaluate((node) => node.isConnected)).toBe(true);
+      await expect(
         page.getByTestId("workspace-pane-main").locator('[data-testid^="workspace-tab-"]'),
       ).toHaveCount(mainTabsBefore);
+      await page.getByTestId("workspace-explorer-toggle").first().click();
+      await expect(explorerSidebar(page).getByTestId("workspace-tab-files")).toBeVisible();
+      await expect(explorerSidebar(page).getByTestId("workspace-tab-changes_tree")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
     } finally {
       await workspace.cleanup();
     }

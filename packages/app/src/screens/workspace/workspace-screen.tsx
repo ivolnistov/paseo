@@ -3618,6 +3618,7 @@ function WorkspaceScreenContent({
     if (!workspaceLayout || !explorerSidebarPaneId || !persistenceKey) return null;
     const explorerPane = findPaneById(workspaceLayout.root, explorerSidebarPaneId);
     if (!explorerPane) return null;
+    const isExplorerOpen = isExplorerSidebarShowing && !desktopFocusModeEnabled;
     const dock = (
       <ExplorerSidebarDock
         pane={explorerPane}
@@ -3625,6 +3626,8 @@ function WorkspaceScreenContent({
         normalizedServerId={normalizedServerId}
         normalizedWorkspaceId={normalizedWorkspaceId}
         isWorkspaceFocused={isRouteFocused}
+        isOpen={isExplorerOpen}
+        isCompact={isMobile}
         closingTabIds={closingTabIds}
         hoveredCloseTabKey={hoveredCloseTabKey}
         setHoveredCloseTabKey={setHoveredCloseTabKey}
@@ -3652,7 +3655,7 @@ function WorkspaceScreenContent({
         isWorkspaceActive={isRouteFocused}
         persistenceKey={persistenceKey}
         containerWidth={workspaceViewportWidth}
-        isOpen={isExplorerSidebarShowing && !desktopFocusModeEnabled}
+        isOpen={isExplorerOpen}
       >
         {dock}
       </ExplorerFrame>
